@@ -25,6 +25,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "s
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 regex = "1"
 futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 pretty_assertions = "1"
