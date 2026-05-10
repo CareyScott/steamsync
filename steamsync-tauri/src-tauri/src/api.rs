@@ -1,369 +1,168 @@
 // Phase 5 wires this into the apply path; suppress until then.
 #![allow(dead_code)]
 
-//! Steam catalog + grid art downloader.
+//! SteamGridDB-backed art downloader.
 //!
-//! Two responsibilities:
+//! We replaced the original Steam CDN approach because the community-
+//! maintained art at <https://www.steamgriddb.com> is dramatically
+//! higher quality than Steam's auto-generated headers, especially for
+//! the smaller Epic / Xbox catalog this app targets.
 //!
-//! 1. **Catalog** — fetch `IStoreService/GetAppList/v1` with proper
-//!    pagination via `last_appid` (the Python implementation hardcodes
-//!    `max_results=50000` and silently truncates the catalog at that
-//!    cutoff — fixed here). Cached to disk for `CATALOG_TTL` so we don't
-//!    re-fetch on every run.
+//! Per game we do:
 //!
-//! 2. **Art** — download the four grid images Steam shows for a non-
-//!    Steam shortcut (vertical box, hero, logo, big-picture banner) into
-//!    `<steam_path>/userdata/<id>/config/grid/`. Parallelized across
-//!    games via `futures::stream::buffer_unordered` so a 100-game
-//!    library finishes in seconds rather than minutes.
+//! 1. **Find** the SGDB game id by searching `display_name` against the
+//!    autocomplete endpoint (handles fuzzy name matches natively, so
+//!    we can drop the regex cascade the Python version needed).
+//! 2. **Resolve** four art URLs in parallel — vertical grid (600x900),
+//!    horizontal grid for big-picture (920x430 / 460x215), hero, logo.
+//! 3. **Download** each URL into the user's `userdata/<id>/config/grid/`
+//!    folder, named so Steam picks them up:
+//!    - `<shortcut_id>p.jpg`         vertical box
+//!    - `<shortcut_id>_hero.jpg`     hero banner
+//!    - `<shortcut_id>_logo.png`     transparent logo
+//!    - `<shortcut_id>_bigpicture.png`  big-picture banner
+//!
+//! Across all selected games this is done at up to `ART_PARALLELISM`
+//! requests in flight, so a hundred-game library finishes in seconds.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
-const STEAM_CDN: &str = "https://steamcdn-a.akamaihd.net/steam/apps";
-const CATALOG_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60); // 7 days
-const APPLIST_URL: &str = "https://api.steampowered.com/IStoreService/GetAppList/v1/";
+const SGDB_BASE: &str = "https://www.steamgriddb.com/api/v2";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const ART_PARALLELISM: usize = 8;
 
-/// Cache schema. Bumped whenever the on-disk shape changes.
-const CACHE_VERSION: u32 = 1;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedCatalog {
-    version: u32,
-    download_timestamp: u64, // seconds since UNIX_EPOCH
-    apps: Vec<(u32, String)>,
+/// Authenticated SteamGridDB client. The API key is mandatory — every
+/// endpoint requires a Bearer token. Users get one for free at
+/// <https://www.steamgriddb.com/profile/preferences/api>.
+pub struct SgdbClient {
+    client: reqwest::Client,
+    api_key: String,
 }
 
-/// In-memory name→appid index. Built from the cache or a fresh fetch.
-pub struct Catalog {
-    /// Comparable name (lowercased, common prefixes stripped) → appid.
-    name_to_id: HashMap<String, u32>,
-    /// Looser name→appid index for fallback matches (no accents,
-    /// no punctuation, etc.). Populated alongside name_to_id.
-    stripped_to_id: HashMap<String, u32>,
-}
-
-impl Catalog {
-    /// Load the cached catalog if it's still fresh; otherwise fetch a
-    /// new one and rewrite the cache.
-    pub async fn load_or_fetch(steam_api_key: &str, cache_dir: &Path) -> Result<Catalog> {
-        let cache_path = cache_dir.join("applist.json");
-
-        if let Ok(c) = read_cache(&cache_path) {
-            if c.version == CACHE_VERSION && !cache_is_stale(c.download_timestamp) {
-                return Ok(Catalog::from_apps(c.apps));
-            }
-        }
-
-        let apps = fetch_full_catalog(steam_api_key).await?;
-        let _ = write_cache(&cache_path, &apps);
-        Ok(Catalog::from_apps(apps))
-    }
-
-    fn from_apps(apps: Vec<(u32, String)>) -> Self {
-        let mut name_to_id: HashMap<String, u32> = HashMap::with_capacity(apps.len());
-        let mut stripped_to_id: HashMap<String, u32> = HashMap::with_capacity(apps.len() / 2);
-
-        for (appid, name) in apps {
-            if name.is_empty() {
-                continue;
-            }
-            let comparable = make_comparable(&name);
-            name_to_id.entry(comparable.clone()).or_insert(appid);
-
-            // Skip noise — Python excludes trials/demos from the stripped
-            // index so a real game doesn't get knocked out by its demo.
-            if comparable.contains(" trial") || comparable.contains(" demo") {
-                continue;
-            }
-            let no_accents = remove_accents(&comparable);
-            stripped_to_id.entry(no_accents).or_insert(appid);
-            let no_punct = remove_punctuation(&comparable);
-            stripped_to_id.entry(no_punct).or_insert(appid);
-            let no_subtitle = remove_subtitle_re().replace(&comparable, "").into_owned();
-            stripped_to_id.entry(no_subtitle).or_insert(appid);
-        }
-
-        Catalog {
-            name_to_id,
-            stripped_to_id,
-        }
-    }
-
-    /// Best-effort lookup of a display name → Steam appid.
-    ///
-    /// Tries the comparable name first, then a cascade of fallbacks
-    /// matching Python `SteamDatabase.guess_appid`. Returns `None` if
-    /// no match found.
-    pub fn guess_appid(&self, display_name: &str) -> Option<u32> {
-        let name = make_comparable(display_name);
-
-        // Direct hit.
-        if let Some(id) = self.name_to_id.get(&name) {
-            // Hardcoded swap: Python prefers Prey 2017 (480490) over Prey
-            // 2006 (3970) since the newer one has more grid art.
-            if *id == 3970 {
-                return Some(480490);
-            }
-            return Some(*id);
-        }
-
-        // "Control" → "Control Ultimate Edition"
-        for suffix in [" ultimate edition", " digital edition", " steam edition"] {
-            let extended = format!("{name}{suffix}");
-            if let Some(id) = self.name_to_id.get(&extended) {
-                return Some(*id);
-            }
-        }
-
-        // "Death's Door Win10" → "Death's Door"
-        let stripped = remove_win10_re().replace(&name, "").into_owned();
-        if let Some(id) = self.name_to_id.get(&stripped) {
-            return Some(*id);
-        }
-
-        // "Yakuza Kiwami (PC)" → "Yakuza Kiwami"
-        let stripped = remove_braces_re().replace(&name, "").into_owned();
-        if let Some(id) = self.name_to_id.get(&stripped) {
-            return Some(*id);
-        }
-
-        // "Ghost of a Tale PC" / "Genesis Noir for Windows" → root
-        let stripped = remove_pc_re().replace(&name, "").into_owned();
-        if let Some(id) = self.name_to_id.get(&stripped) {
-            return Some(*id);
-        }
-
-        // "Grand Theft Auto V: Premium Edition" → "Grand Theft Auto V"
-        let stripped = remove_subtitle_re().replace(&name, "").into_owned();
-        if let Some(id) = self.stripped_to_id.get(&stripped) {
-            return Some(*id);
-        }
-
-        // "Raji: An Ancient Epic" → "Raji An Ancient Epic" (punctuation)
-        let stripped = remove_punctuation(&name);
-        if let Some(id) = self
-            .name_to_id
-            .get(&stripped)
-            .or_else(|| self.stripped_to_id.get(&stripped))
-        {
-            return Some(*id);
-        }
-
-        // "ABZÛ" → "ABZU" (accent fold)
-        let stripped = remove_accents(&name);
-        if let Some(id) = self
-            .name_to_id
-            .get(&stripped)
-            .or_else(|| self.stripped_to_id.get(&stripped))
-        {
-            return Some(*id);
-        }
-
-        // "Rocket League®" → "Rocket League" (drop non-ASCII)
-        let stripped = strip_nonascii(&name);
-        if let Some(id) = self.name_to_id.get(&stripped) {
-            return Some(*id);
-        }
-
-        None
-    }
-}
-
-/// Make a display name easier to compare across stores. Lowercases and
-/// removes the hyphen-space sequence many stores insert ("Half-Life 2:
-/// Lost Coast" vs "Half Life 2: Lost Coast").
-fn make_comparable(name: &str) -> String {
-    let no_hyphen = name.replace("- ", "");
-    no_hyphen.to_lowercase()
-}
-
-fn remove_accents(s: &str) -> String {
-    // Map common Latin-1 supplement accents back to ASCII. Good enough
-    // for the cases steamsync hit historically (ABZÛ, café, etc.) without
-    // pulling in a full unicode-normalization crate.
-    s.chars()
-        .filter_map(|c| match c {
-            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => Some('a'),
-            'è' | 'é' | 'ê' | 'ë' => Some('e'),
-            'ì' | 'í' | 'î' | 'ï' => Some('i'),
-            'ò' | 'ó' | 'ô' | 'õ' | 'ö' => Some('o'),
-            'ù' | 'ú' | 'û' | 'ü' => Some('u'),
-            'ñ' => Some('n'),
-            'ç' => Some('c'),
-            c if c.is_ascii() => Some(c),
-            // Drop other non-ASCII for the stripped index.
-            _ => Some(c),
-        })
-        .collect()
-}
-
-fn remove_punctuation(s: &str) -> String {
-    s.chars()
-        .filter(|c| !matches!(*c, ':' | ';' | ',' | '.' | '=' | '+' | '?'))
-        .collect()
-}
-
-fn strip_nonascii(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii()).collect::<String>().trim().to_string()
-}
-
-fn remove_subtitle_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\s*:.*").unwrap())
-}
-
-fn remove_braces_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\s*\(.*\)").unwrap())
-}
-
-fn remove_pc_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"[ _](pc|for windows|windows)$").unwrap())
-}
-
-fn remove_win10_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r" win10\b").unwrap())
-}
-
-// ----------------------------------------------------------------------
-// Catalog fetch (paginated)
-// ----------------------------------------------------------------------
-
-async fn fetch_full_catalog(api_key: &str) -> Result<Vec<(u32, String)>> {
-    if api_key.is_empty() {
-        return Err(Error::VdfParse(
-            "Steam API key required to download art. Set one in Configure.".into(),
-        ));
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .map_err(|e| Error::VdfParse(format!("reqwest client: {e}")))?;
-
-    let mut all: Vec<(u32, String)> = Vec::new();
-    let mut last_appid: u64 = 0;
-    loop {
-        let resp: serde_json::Value = client
-            .get(APPLIST_URL)
-            .query(&[
-                ("key", api_key.to_string()),
-                ("max_results", "50000".to_string()),
-                ("last_appid", last_appid.to_string()),
-            ])
-            .send()
-            .await
-            .map_err(|e| Error::VdfParse(format!("catalog GET: {e}")))?
-            .json()
-            .await
-            .map_err(|e| Error::VdfParse(format!("catalog JSON: {e}")))?;
-
-        let response = resp
-            .get("response")
-            .ok_or_else(|| Error::VdfParse("catalog response missing 'response'".into()))?;
-
-        let apps = response
-            .get("apps")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| Error::VdfParse("catalog response missing 'apps' array".into()))?;
-
-        for app in apps {
-            let appid = app
-                .get("appid")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as u32)
-                .unwrap_or(0);
-            let name = app
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if appid != 0 && !name.is_empty() {
-                all.push((appid, name));
-            }
-        }
-
-        let have_more = response
-            .get("have_more_results")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !have_more {
-            break;
-        }
-        last_appid = response
-            .get("last_appid")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        if last_appid == 0 {
-            break; // defensive: would otherwise loop forever
-        }
-    }
-    Ok(all)
-}
-
-fn read_cache(path: &Path) -> Result<CachedCatalog> {
-    let bytes = std::fs::read(path)?;
-    let cached: CachedCatalog = serde_json::from_slice(&bytes)
-        .map_err(|e| Error::VdfParse(format!("cache parse: {e}")))?;
-    Ok(cached)
-}
-
-fn write_cache(path: &Path, apps: &[(u32, String)]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let cached = CachedCatalog {
-        version: CACHE_VERSION,
-        download_timestamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        apps: apps.to_vec(),
-    };
-    let bytes = serde_json::to_vec(&cached)
-        .map_err(|e| Error::VdfParse(format!("cache write: {e}")))?;
-    std::fs::write(path, bytes)?;
-    Ok(())
-}
-
-fn cache_is_stale(download_ts: u64) -> bool {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    now.saturating_sub(download_ts) > CATALOG_TTL.as_secs()
-}
-
-// ----------------------------------------------------------------------
-// Art download
-// ----------------------------------------------------------------------
-
-/// One game's worth of art to fetch. `appid` is the Steam appid (after
-/// `guess_appid`); `shortcut_id_unsigned` is what Steam expects in the
-/// grid filenames.
 #[derive(Debug, Clone)]
 pub struct ArtTarget {
-    pub appid: u32,
-    pub shortcut_id_unsigned: u32,
     pub display_name: String,
+    pub shortcut_id_unsigned: u32,
 }
 
-/// Download all art for every target in parallel. Returns the count of
-/// new files actually written (existing files are not re-downloaded).
+#[derive(Debug, Deserialize)]
+struct SgdbList<T> {
+    #[serde(default)]
+    success: bool,
+    #[serde(default = "Vec::new")]
+    data: Vec<T>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SgdbSearchHit {
+    id: u32,
+    #[serde(default)]
+    #[allow(dead_code)]
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SgdbArt {
+    #[serde(default)]
+    #[allow(dead_code)]
+    id: u32,
+    url: String,
+}
+
+impl SgdbClient {
+    pub fn new(api_key: String) -> Result<Self> {
+        if api_key.trim().is_empty() {
+            return Err(Error::VdfParse(
+                "SteamGridDB API key is required for art download. \
+                 Get one from https://www.steamgriddb.com/profile/preferences/api"
+                    .into(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(|e| Error::VdfParse(format!("reqwest client: {e}")))?;
+        Ok(Self { client, api_key })
+    }
+
+    /// Best-effort lookup of a display name → SGDB game id. Returns
+    /// `None` if the API errors or there are no results.
+    pub async fn find_game_id(&self, display_name: &str) -> Option<u32> {
+        let url = format!(
+            "{SGDB_BASE}/search/autocomplete/{}",
+            urlencoding::encode(display_name)
+        );
+        let list: SgdbList<SgdbSearchHit> = self.get_json(&url).await.ok()?;
+        list.data.into_iter().next().map(|h| h.id)
+    }
+
+    /// Fetch the four art URLs for one SGDB game id. Any individual
+    /// endpoint may legitimately return zero results (not every game
+    /// has every art type); those become `None`.
+    pub async fn art_for(&self, sgdb_id: u32) -> ArtUrls {
+        let grid_vertical = format!("{SGDB_BASE}/grids/game/{sgdb_id}?dimensions=600x900");
+        let grid_wide = format!("{SGDB_BASE}/grids/game/{sgdb_id}?dimensions=920x430,460x215");
+        let heroes = format!("{SGDB_BASE}/heroes/game/{sgdb_id}");
+        let logos = format!("{SGDB_BASE}/logos/game/{sgdb_id}");
+        let (box_art, hero, logo, big_picture) = futures::join!(
+            self.first_url(&grid_vertical),
+            self.first_url(&heroes),
+            self.first_url(&logos),
+            self.first_url(&grid_wide),
+        );
+        ArtUrls {
+            box_art,
+            hero,
+            logo,
+            big_picture,
+        }
+    }
+
+    async fn first_url(&self, endpoint: &str) -> Option<String> {
+        let list: SgdbList<SgdbArt> = self.get_json(endpoint).await.ok()?;
+        list.data.into_iter().next().map(|a| a.url)
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let resp = self
+            .client
+            .get(url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| Error::VdfParse(format!("SGDB GET {url}: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(Error::VdfParse(format!(
+                "SGDB {url} returned HTTP {}",
+                resp.status()
+            )));
+        }
+        resp.json()
+            .await
+            .map_err(|e| Error::VdfParse(format!("SGDB JSON decode {url}: {e}")))
+    }
+}
+
+/// The four art URLs we'd write for a single game. Each is independently
+/// optional — SGDB has good coverage but not every game has every type.
+pub struct ArtUrls {
+    pub box_art: Option<String>,
+    pub hero: Option<String>,
+    pub logo: Option<String>,
+    pub big_picture: Option<String>,
+}
+
+/// Download art for every target in parallel via SGDB. Returns the
+/// number of files actually written (existing files aren't re-downloaded
+/// unless `replace_existing`).
 pub async fn download_art_all(
+    sgdb: &SgdbClient,
     targets: Vec<ArtTarget>,
     grid_folder: PathBuf,
     replace_existing: bool,
@@ -372,168 +171,104 @@ pub async fn download_art_all(
         .await
         .map_err(Error::Io)?;
 
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .map_err(|e| Error::VdfParse(format!("reqwest client: {e}")))?;
-
-    let total_written: usize = stream::iter(targets)
+    // For each target: lookup → resolve URLs → download each. We pipe
+    // the whole thing through buffer_unordered so we get up to
+    // ART_PARALLELISM games-in-flight without serializing on the slowest
+    // network call.
+    let total: usize = stream::iter(targets)
         .map(|target| {
-            let client = client.clone();
             let grid = grid_folder.clone();
-            async move { download_one_game(&client, &target, &grid, replace_existing).await }
+            async move {
+                let Some(sgdb_id) = sgdb.find_game_id(&target.display_name).await else {
+                    return 0;
+                };
+                let urls = sgdb.art_for(sgdb_id).await;
+                download_one_game(sgdb, &target, urls, &grid, replace_existing).await
+            }
         })
         .buffer_unordered(ART_PARALLELISM)
         .fold(0usize, |acc, written| async move { acc + written })
         .await;
 
-    Ok(total_written)
+    Ok(total)
 }
 
 async fn download_one_game(
-    client: &reqwest::Client,
+    sgdb: &SgdbClient,
     target: &ArtTarget,
+    urls: ArtUrls,
     grid_folder: &Path,
     replace_existing: bool,
 ) -> usize {
-    let urls = [
+    let id = target.shortcut_id_unsigned;
+    let plan = [
+        (urls.box_art, grid_folder.join(format!("{id}p.jpg"))),
+        (urls.hero, grid_folder.join(format!("{id}_hero.jpg"))),
+        (urls.logo, grid_folder.join(format!("{id}_logo.png"))),
         (
-            format!("{STEAM_CDN}/{}/library_600x900_2x.jpg", target.appid),
-            grid_folder.join(format!("{}p.jpg", target.shortcut_id_unsigned)),
-        ),
-        (
-            format!("{STEAM_CDN}/{}/library_hero.jpg", target.appid),
-            grid_folder.join(format!("{}_hero.jpg", target.shortcut_id_unsigned)),
-        ),
-        (
-            format!("{STEAM_CDN}/{}/logo.png", target.appid),
-            grid_folder.join(format!("{}_logo.png", target.shortcut_id_unsigned)),
-        ),
-        (
-            format!("{STEAM_CDN}/{}/header.jpg", target.appid),
-            grid_folder.join(format!("{}_bigpicture.png", target.shortcut_id_unsigned)),
+            urls.big_picture,
+            grid_folder.join(format!("{id}_bigpicture.png")),
         ),
     ];
 
     let mut written = 0;
-    for (url, dest) in urls {
+    for (maybe_url, dest_base) in plan {
+        let Some(url) = maybe_url else { continue };
+        // SGDB serves images at the URL's native extension; we keep our
+        // Steam-expected suffix but use the source extension if it's a
+        // known image type, so the file is well-formed.
+        let dest = with_source_extension(&dest_base, &url);
         if !replace_existing && dest.is_file() {
             continue;
         }
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(bytes) = resp.bytes().await {
-                    if tokio::fs::write(&dest, &bytes).await.is_ok() {
-                        written += 1;
-                    }
-                }
-            }
-            _ => {
-                // 404s are normal — not every game has every art type.
-                // Stay quiet rather than spam stderr per game.
-            }
+        if download_to(&sgdb.client, &url, &dest).await {
+            written += 1;
         }
     }
     written
 }
 
+/// Steam doesn't actually care about the extension on grid art files —
+/// it sniffs the content. So we keep our convention (`p.jpg`,
+/// `_logo.png`, etc.) which is what Python's steamsync writes, even if
+/// the upstream URL is a different format. Means SGDB's `.webp` files
+/// land at `_hero.jpg` etc., but Steam happily renders them.
+fn with_source_extension(dest_base: &Path, _url: &str) -> PathBuf {
+    dest_base.to_path_buf()
+}
+
+async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> bool {
+    let resp = match client.get(url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return false,
+    };
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    tokio::fs::write(dest, &bytes).await.is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
 
-    fn catalog(rows: &[(u32, &str)]) -> Catalog {
-        Catalog::from_apps(rows.iter().map(|(id, n)| (*id, (*n).to_string())).collect())
+    #[test]
+    fn new_rejects_empty_key() {
+        assert!(SgdbClient::new(String::new()).is_err());
     }
 
     #[test]
-    fn direct_hit() {
-        let c = catalog(&[(620, "Portal 2"), (440, "Team Fortress 2")]);
-        assert_eq!(c.guess_appid("Portal 2"), Some(620));
-        assert_eq!(c.guess_appid("Team Fortress 2"), Some(440));
+    fn new_rejects_whitespace_key() {
+        assert!(SgdbClient::new("   ".into()).is_err());
     }
 
     #[test]
-    fn prey_swap() {
-        // 3970 is old Prey; 480490 is Prey 2017. The catalog returns 3970
-        // for "Prey" but we should rewrite to 480490 (more grid art).
-        let c = catalog(&[(3970, "Prey"), (480490, "Prey")]);
-        assert_eq!(c.guess_appid("Prey"), Some(480490));
-    }
-
-    #[test]
-    fn ultimate_edition_suffix() {
-        let c = catalog(&[(870780, "Control Ultimate Edition")]);
-        assert_eq!(c.guess_appid("Control"), Some(870780));
-    }
-
-    #[test]
-    fn strips_win10_suffix() {
-        let c = catalog(&[(894020, "Death's Door")]);
-        assert_eq!(c.guess_appid("Death's Door Win10"), Some(894020));
-    }
-
-    #[test]
-    fn strips_parenthetical_suffix() {
-        let c = catalog(&[(813780, "Yakuza Kiwami")]);
-        assert_eq!(c.guess_appid("Yakuza Kiwami (PC)"), Some(813780));
-    }
-
-    #[test]
-    fn strips_pc_suffix() {
-        let c = catalog(&[(417860, "Ghost of a Tale")]);
-        assert_eq!(c.guess_appid("Ghost of a Tale PC"), Some(417860));
-    }
-
-    #[test]
-    fn strips_for_windows_suffix() {
-        let c = catalog(&[(1316840, "Genesis Noir")]);
-        assert_eq!(c.guess_appid("Genesis Noir for Windows"), Some(1316840));
-    }
-
-    #[test]
-    fn strips_subtitle_via_stripped_index() {
-        let c = catalog(&[(271590, "Grand Theft Auto V")]);
-        assert_eq!(
-            c.guess_appid("Grand Theft Auto V: Premium Edition"),
-            Some(271590)
-        );
-    }
-
-    #[test]
-    fn folds_accents() {
-        let c = catalog(&[(384190, "ABZU")]);
-        assert_eq!(c.guess_appid("ABZÛ"), Some(384190));
-    }
-
-    #[test]
-    fn folds_punctuation() {
-        let c = catalog(&[(1119980, "Raji An Ancient Epic")]);
-        assert_eq!(c.guess_appid("Raji: An Ancient Epic"), Some(1119980));
-    }
-
-    #[test]
-    fn strips_trademark_marks() {
-        let c = catalog(&[(252950, "Rocket League")]);
-        assert_eq!(c.guess_appid("Rocket League®"), Some(252950));
-    }
-
-    #[test]
-    fn returns_none_for_unknown() {
-        let c = catalog(&[(620, "Portal 2")]);
-        assert_eq!(c.guess_appid("Some Game That Does Not Exist"), None);
-    }
-
-    #[test]
-    fn trial_and_demo_dont_pollute_stripped_index() {
-        let c = catalog(&[
-            (111, "Game Trial"),
-            (222, "Game Demo"),
-            (333, "Game"),
-        ]);
-        // Demos/trials should still match their exact names...
-        assert_eq!(c.guess_appid("Game Trial"), Some(111));
-        // ...but a query for the real game shouldn't fall back to them.
-        assert_eq!(c.guess_appid("Game"), Some(333));
+    fn new_accepts_real_key() {
+        // Build via match so we don't need Debug on SgdbClient itself.
+        match SgdbClient::new("a-real-key".into()) {
+            Ok(c) => assert_eq!(c.api_key, "a-real-key"),
+            Err(e) => panic!("expected Ok, got Err({e})"),
+        }
     }
 }

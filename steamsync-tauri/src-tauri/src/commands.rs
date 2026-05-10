@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::api::{download_art_all, ArtTarget, Catalog};
+use crate::api::{download_art_all, ArtTarget, SgdbClient};
 use crate::error::{Error, Result};
 use crate::launchers;
 use crate::steam;
@@ -129,10 +129,7 @@ pub async fn apply_changes(
 
     // 9. Art download (after the write so shortcut ids are stable).
     if opts.download_art && !selected_games.is_empty() {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("steamsync");
-        let catalog = Catalog::load_or_fetch(&opts.steam_api_key, &cache_dir).await?;
+        let sgdb = SgdbClient::new(opts.steamgriddb_api_key.clone())?;
 
         let grid_folder = steam_path
             .join("userdata")
@@ -140,18 +137,17 @@ pub async fn apply_changes(
             .join("config")
             .join("grid");
 
-        let mut targets = Vec::new();
-        for g in &selected_games {
-            if let Some(steam_appid) = catalog.guess_appid(&g.display_name) {
+        let targets: Vec<ArtTarget> = selected_games
+            .iter()
+            .map(|g| {
                 let (exe, _) = launch_target(g, opts.use_uri);
-                targets.push(ArtTarget {
-                    appid: steam_appid,
-                    shortcut_id_unsigned: shortcut_id_unsigned(&exe, &g.app_name),
+                ArtTarget {
                     display_name: g.display_name.clone(),
-                });
-            }
-        }
-        download_art_all(targets, grid_folder, false).await?;
+                    shortcut_id_unsigned: shortcut_id_unsigned(&exe, &g.app_name),
+                }
+            })
+            .collect();
+        download_art_all(&sgdb, targets, grid_folder, false).await?;
     }
 
     Ok(ApplyResult {

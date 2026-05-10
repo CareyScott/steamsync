@@ -57,7 +57,9 @@ pub struct SyncOptions {
     pub download_art: bool,
     pub egs_manifests: String,
     pub steam_path: String,
-    pub steam_api_key: String,
+    /// SteamGridDB API key (https://www.steamgriddb.com). Required when
+    /// download_art is true.
+    pub steamgriddb_api_key: String,
 }
 
 /// Sources the Tauri app supports. Narrower than the Python CLI on

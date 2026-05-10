@@ -44,7 +44,7 @@ export interface SyncOptions {
   download_art: boolean;
   egs_manifests: string;
   steam_path: string;
-  steam_api_key: string;
+  steamgriddb_api_key: string;
 }
 
 /** Human-readable label for each known storetag value. */

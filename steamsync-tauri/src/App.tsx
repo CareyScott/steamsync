@@ -17,7 +17,7 @@ const DEFAULT_OPTIONS: SyncOptions = {
   download_art: false,
   egs_manifests: "C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests",
   steam_path: "C:\\Program Files (x86)\\Steam",
-  steam_api_key: "",
+  steamgriddb_api_key: "",
 };
 
 export default function App() {

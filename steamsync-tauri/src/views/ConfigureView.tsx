@@ -98,12 +98,24 @@ export default function ConfigureView(props: Props) {
 
         {options.download_art && (
           <Form.Item
-            label="Steam API key"
-            help="Required when downloading art."
+            label="SteamGridDB API key"
+            help={
+              <>
+                Required when downloading art. Get one for free at{" "}
+                <a
+                  href="https://www.steamgriddb.com/profile/preferences/api"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  steamgriddb.com
+                </a>
+                .
+              </>
+            }
           >
             <Input.Password
-              value={options.steam_api_key}
-              onChange={(e) => set({ steam_api_key: e.target.value })}
+              value={options.steamgriddb_api_key}
+              onChange={(e) => set({ steamgriddb_api_key: e.target.value })}
             />
           </Form.Item>
         )}
