@@ -11,7 +11,6 @@ from xml.dom import minidom
 
 
 import steamsync.defs as defs
-import steamsync.defs as defssteams
 import steamsync.util as util
 
 import steamsync.launchers.launcher as launcher
@@ -146,6 +145,9 @@ def _get_details_from_config(path_to_config):
     exes = doc.getElementsByTagName("Executable")
     for exe in exes:
         return exe.getAttribute("Name"), display_name
+    # No Executable element. Caller unpacks the return value, so we must
+    # return a 2-tuple rather than falling through to an implicit None.
+    return None, display_name
 
 
 def _is_game_judging_by_manifest(path_to_manifest):
