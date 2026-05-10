@@ -153,31 +153,26 @@ export default function DetectView(props: Props) {
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size="large">
-      <Space wrap>
-        <Text>Steam path:</Text>
-        <Input
-          style={{ width: 360 }}
-          value={props.options.steam_path}
-          onChange={(e) =>
-            props.onOptionsChange({
-              ...props.options,
-              steam_path: e.target.value,
-            })
-          }
-        />
+      <Space wrap align="center">
         <Button
           type="primary"
+          size="large"
           loading={loading}
           icon={<ReloadOutlined />}
           onClick={handleDetect}
         >
-          {totalGames > 0 ? "Re-scan" : "Detect games"}
+          {totalGames > 0 ? "Scan again" : "Find my games"}
         </Button>
+        {props.options.steam_path && (
+          <Text type="secondary">
+            Steam folder: <Text code>{props.options.steam_path}</Text>
+          </Text>
+        )}
       </Space>
 
       {totalGames === 0 && !loading && (
         <Empty
-          description="No games yet — click Detect games to scan your launchers."
+          description="Click 'Find my games' to scan Epic Games Store and the Xbox app on this PC."
           image={Empty.PRESENTED_IMAGE_SIMPLE}
         />
       )}

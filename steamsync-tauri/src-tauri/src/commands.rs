@@ -17,6 +17,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use serde::Serialize;
+use tauri::{Emitter, Window};
+
 use crate::api::{download_art_all, ArtTarget, SgdbClient};
 use crate::error::{Error, Result};
 use crate::launchers;
@@ -27,6 +30,87 @@ use crate::types::{
     default_steam_path, known_sources, ApplyResult, DetectResult, Game, SteamAccount,
     SyncOptions,
 };
+
+/// Frontend-visible event payloads emitted during apply_changes. Listen
+/// in React via `listen("apply-progress", ...)`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "stage", rename_all = "kebab-case")]
+enum ApplyEvent {
+    /// We're walking each launcher's library.
+    Detecting { launcher: &'static str },
+    /// We're merging selections into shortcuts.vdf.
+    WritingShortcuts,
+    /// Per-game art download tick. `current` is 1-indexed, `total` is the
+    /// total number of games we're fetching art for.
+    DownloadingArt {
+        game: String,
+        current: usize,
+        total: usize,
+    },
+}
+
+/// Try to find the Steam install path from the Windows registry. Returns
+/// `None` on non-Windows or when Steam isn't installed. On success, the
+/// path is verified to actually exist before being returned so we don't
+/// pass a stale registry value back to the UI.
+#[tauri::command]
+pub async fn auto_detect_steam_path() -> Option<String> {
+    let candidate = registry_steam_path().or_else(common_steam_path)?;
+    if PathBuf::from(&candidate).join("steam.exe").is_file()
+        || PathBuf::from(&candidate).join("steam.sh").is_file()
+        || PathBuf::from(&candidate).is_dir()
+    {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn registry_steam_path() -> Option<String> {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    // 64-bit Windows hides 32-bit registry entries here. Steam ships as
+    // a 32-bit app even on 64-bit Windows.
+    let keys = [
+        "SOFTWARE\\WOW6432Node\\Valve\\Steam",
+        "SOFTWARE\\Valve\\Steam",
+    ];
+    for key_path in keys {
+        if let Ok(key) = hklm.open_subkey(key_path) {
+            if let Ok(path) = key.get_value::<String, _>("InstallPath") {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn registry_steam_path() -> Option<String> {
+    None
+}
+
+/// Last-resort fallback: check the conventional install paths.
+fn common_steam_path() -> Option<String> {
+    let candidates = if cfg!(target_os = "linux") {
+        vec![
+            dirs::home_dir().map(|h| h.join(".steam").join("steam"))?,
+            dirs::home_dir().map(|h| h.join(".local").join("share").join("Steam"))?,
+        ]
+    } else {
+        vec![
+            PathBuf::from("C:\\Program Files (x86)\\Steam"),
+            PathBuf::from("C:\\Program Files\\Steam"),
+        ]
+    };
+    candidates
+        .into_iter()
+        .find(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+}
 
 #[tauri::command]
 pub async fn detect_games(opts: SyncOptions) -> Result<DetectResult> {
@@ -43,9 +127,15 @@ pub async fn detect_games(opts: SyncOptions) -> Result<DetectResult> {
 
 #[tauri::command]
 pub async fn apply_changes(
+    window: Window,
     opts: SyncOptions,
     selected_app_names: Vec<String>,
 ) -> Result<ApplyResult> {
+    let emit = |event: ApplyEvent| {
+        // Failure to emit shouldn't fail the apply — log and continue.
+        let _ = window.emit("apply-progress", &event);
+    };
+
     let steam_path = resolve_steam_path(&opts);
 
     // 1. Pick the Steam account. --steamid is required when there are
@@ -55,6 +145,15 @@ pub async fn apply_changes(
 
     // 2. Collect everything (for both the selection filter and the
     // remove-missing pass, which needs the full known-games set).
+    for launcher in &opts.sources {
+        emit(ApplyEvent::Detecting {
+            launcher: match launcher.as_str() {
+                "epicstore" => "epicstore",
+                "xbox" => "xbox",
+                _ => "other",
+            },
+        });
+    }
     let all_games = launchers::collect_games(&opts)?;
     let selected: HashSet<&str> = selected_app_names.iter().map(String::as_str).collect();
     let selected_games: Vec<&Game> = all_games
@@ -120,6 +219,7 @@ pub async fn apply_changes(
     // 8. Write back if anything changed.
     let wrote_shortcuts = added > 0 || removed > 0;
     if wrote_shortcuts {
+        emit(ApplyEvent::WritingShortcuts);
         let root = shortcuts::build_root(&existing, &leftover_root);
         let new_bytes = shortcuts::serialize(&root);
         // The GUI always backs up — the "live dangerously" flag from the
@@ -136,6 +236,15 @@ pub async fn apply_changes(
             .join(&user.steamid)
             .join("config")
             .join("grid");
+
+        let total = selected_games.len();
+        for (i, g) in selected_games.iter().enumerate() {
+            emit(ApplyEvent::DownloadingArt {
+                game: g.display_name.clone(),
+                current: i + 1,
+                total,
+            });
+        }
 
         let targets: Vec<ArtTarget> = selected_games
             .iter()

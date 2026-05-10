@@ -12,9 +12,6 @@ pub enum Error {
 
     #[error("Failed to parse Steam config: {0}")]
     VdfParse(String),
-
-    #[error("Apply not yet implemented in the native build. See ROADMAP.md.")]
-    NotYetImplemented,
 }
 
 impl serde::Serialize for Error {
