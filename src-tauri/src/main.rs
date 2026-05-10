@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    steamsync_tauri_lib::run();
+    steamsync_lib::run();
 }

@@ -1,5 +1,5 @@
-//! steamsync-tauri: native Tauri 2 GUI for adding non-Steam game launchers
-//! (Epic Games Store, itch.io, Xbox, legendary) to Steam as shortcuts.
+//! steamsync: native Tauri 2 desktop app for adding non-Steam games
+//! (Epic Games Store, Xbox) to Steam as shortcuts.
 
 mod api;
 mod commands;

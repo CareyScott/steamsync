@@ -1,12 +1,12 @@
 [package]
-name = "steamsync-tauri"
+name = "steamsync"
 version = "0.1.0"
-description = "Native Tauri GUI for syncing Epic/itch.io/Xbox/legendary games into Steam"
+description = "Native Tauri desktop app for adding Epic Games Store and Xbox games to Steam"
 license = "AGPL-3.0-or-later"
 edition = "2021"
 
 [lib]
-name = "steamsync_tauri_lib"
+name = "steamsync_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
