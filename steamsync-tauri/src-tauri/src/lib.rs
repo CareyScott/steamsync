@@ -16,6 +16,7 @@ pub fn run() {
             commands::detect_games,
             commands::apply_changes,
             commands::auto_detect_steam_path,
+            commands::fetch_art_previews,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

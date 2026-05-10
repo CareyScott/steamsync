@@ -104,6 +104,11 @@ export default function App() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState("detect");
 
+  const selectedGames = useMemo(
+    () => games.filter((g) => selected.has(g.app_name)),
+    [games, selected],
+  );
+
   const dismissWelcome = () => {
     localStorage.setItem(STORAGE.SEEN_WELCOME, "true");
     setShowWelcome(false);
@@ -210,7 +215,7 @@ export default function App() {
                 children: (
                   <ApplyView
                     options={options}
-                    selectedAppNames={Array.from(selected)}
+                    selectedGames={selectedGames}
                     onSuccess={() => {
                       // After a successful apply, clear selection so the
                       // next run starts fresh.

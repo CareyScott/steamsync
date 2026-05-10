@@ -31,6 +31,14 @@ use crate::types::{
     SyncOptions,
 };
 
+/// One game's box-art URL, used to show a thumbnail grid before the
+/// user commits to writing shortcuts.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtPreview {
+    pub display_name: String,
+    pub box_art_url: Option<String>,
+}
+
 /// Frontend-visible event payloads emitted during apply_changes. Listen
 /// in React via `listen("apply-progress", ...)`.
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +118,42 @@ fn common_steam_path() -> Option<String> {
         .into_iter()
         .find(|p| p.is_dir())
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Fetch the SGDB box-art URL for each provided display name, in
+/// parallel. Returns `box_art_url = None` when no match is found.
+/// Used by the Apply view to render a thumbnail grid before the user
+/// commits to writing shortcuts.
+#[tauri::command]
+pub async fn fetch_art_previews(
+    api_key: String,
+    display_names: Vec<String>,
+) -> Result<Vec<ArtPreview>> {
+    use futures::stream::{self, StreamExt};
+
+    if display_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sgdb = SgdbClient::new(api_key)?;
+
+    let previews: Vec<ArtPreview> = stream::iter(display_names)
+        .map(|name| {
+            let sgdb = &sgdb;
+            async move {
+                let box_art_url = match sgdb.find_game_id(&name).await {
+                    Some(id) => sgdb.art_for(id).await.box_art,
+                    None => None,
+                };
+                ArtPreview {
+                    display_name: name,
+                    box_art_url,
+                }
+            }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    Ok(previews)
 }
 
 #[tauri::command]

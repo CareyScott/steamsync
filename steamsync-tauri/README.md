@@ -27,7 +27,7 @@ All five phases of the native Rust port are in. The app reads your launcher libr
 | 4. Steam catalog API + parallel art download | ✅ |
 | 5. Apply path wired end-to-end | ✅ |
 
-52 unit tests cover the codec round-trip, every launcher filter rule, every `guess_appid` fallback, and the account/cleanup helpers. The `shortcuts.vdf` codec is cross-validated against Python's reference `vdf` library for byte-exact output.
+42 unit tests cover the codec round-trip, every launcher filter rule, every name-matching fallback, and the account/cleanup helpers. The `shortcuts.vdf` codec is cross-validated against Python's reference `vdf` library for byte-exact output.
 
 ## Prerequisites
 
@@ -36,28 +36,43 @@ All five phases of the native Rust port are in. The app reads your launcher libr
 - Windows: MSVC C++ Build Tools + WebView2 runtime
 - macOS / Linux: standard Tauri 2 prerequisites
 
-## Develop
+## Build the `.exe`
+
+One command. Same shape as [GitSwitch-Gui](https://github.com/biohacker0/GitSwitch-Gui).
 
 ```powershell
 cd steamsync-tauri
 npm install
-npm run tauri:dev
+npm run tauri build
 ```
 
-First run compiles ~370 Rust crates (10–15 min). Subsequent runs are seconds.
+What you get under `src-tauri/target/release/`:
 
-Run the Rust tests:
+| File | What it is |
+|---|---|
+| `steamsync.exe` | **Standalone portable binary.** Double-click to run, no installer needed. ~12 MB. |
+| `bundle/msi/steamsync_0.1.0_x64_en-US.msi` | Windows MSI installer (recommended for distribution). |
+| `bundle/nsis/steamsync_0.1.0_x64-setup.exe` | NSIS installer (alternative). |
+
+The first build is the slow one — Rust compiles ~370 crates (~10-15 min). Subsequent builds are seconds.
+
+> **Shortcut:** `npm run tauri:build` is the same as `npm run tauri build` — both forward to `tauri build`.
+
+## Develop (hot-reload)
 
 ```powershell
-cd src-tauri
+cd steamsync-tauri
+npm install
+npm run tauri dev
+```
+
+Opens the app with hot reload on file changes. Use this during development.
+
+## Run the tests
+
+```powershell
+cd steamsync-tauri/src-tauri
 cargo test
-```
-
-## Build a release
-
-```powershell
-npm run tauri:build
-# MSI and NSIS installers land in src-tauri/target/release/bundle/
 ```
 
 ## Layout

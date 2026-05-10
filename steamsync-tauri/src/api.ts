@@ -20,6 +20,23 @@ export async function autoDetectSteamPath(): Promise<string | null> {
   return await invoke<string | null>("auto_detect_steam_path");
 }
 
+export interface ArtPreview {
+  display_name: string;
+  box_art_url: string | null;
+}
+
+/** Fetch SGDB box-art URLs for a list of display names. Used to render
+ * a thumbnail grid in the Apply view before the user commits. */
+export async function fetchArtPreviews(
+  apiKey: string,
+  displayNames: string[],
+): Promise<ArtPreview[]> {
+  return await invoke<ArtPreview[]>("fetch_art_previews", {
+    apiKey,
+    displayNames,
+  });
+}
+
 /** Live progress events emitted from `apply_changes`. */
 export type ApplyEvent =
   | { stage: "detecting"; launcher: string }
