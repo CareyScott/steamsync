@@ -1,10 +1,13 @@
 # LICENSE: AGPLv3. See LICENSE at root of repo
 
 import argparse
+import contextlib
+import json
 import os
 import platform
 import pprint
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -152,6 +155,29 @@ def parse_arguments():
         default=False,
         action="store_true",
         help="For debugging. Print the Steam shortcuts.vdf as text and exit.",
+        required=False,
+    )
+
+    parser.add_argument(
+        "--json-collect",
+        default=False,
+        action="store_true",
+        help="Detect games and steam accounts and emit them as JSON to stdout, then exit. All other prints are routed to stderr. For programmatic use (e.g. the Tauri GUI).",
+        required=False,
+    )
+
+    parser.add_argument(
+        "--json-apply",
+        default=False,
+        action="store_true",
+        help='Apply non-interactively using a selection passed via --selection or stdin. --steamid is required. Final result is printed as JSON to stdout. For programmatic use.',
+        required=False,
+    )
+
+    parser.add_argument(
+        "--selection",
+        default=None,
+        help='JSON {"selected_app_names": [...]} for --json-apply. If omitted, the selection is read from stdin. Empty/missing list means "apply all detected games".',
         required=False,
     )
 
@@ -581,10 +607,6 @@ def get_steam_user(
     return user
 
 
-####################################################################################################
-# Main
-
-
 def _load_shortcuts(shortcut_file_path, can_init_on_missing):
     """Load the user's shortcuts.vdf file.
 
@@ -603,9 +625,167 @@ def _load_shortcuts(shortcut_file_path, can_init_on_missing):
     return shortcuts
 
 
+####################################################################################################
+# JSON I/O for programmatic clients (Tauri GUI, scripts).
+
+
+def _game_to_dict(game):
+    return {
+        "app_name": game.app_name,
+        "display_name": game.display_name,
+        "executable_path": game.executable_path,
+        "install_folder": game.install_folder,
+        "launch_arguments": game.launch_arguments,
+        "icon": game.icon,
+        "uri": game.uri,
+        "storetag": game.storetag,
+        "shortcut_id": game.shortcut_id,
+    }
+
+
+def _account_to_dict(account):
+    return {"steamid": account.steamid, "username": account.username}
+
+
+def _emit_json(payload):
+    """Write a single JSON document to real stdout, regardless of any redirects."""
+    sys.__stdout__.write(json.dumps(payload))
+    sys.__stdout__.write("\n")
+    sys.__stdout__.flush()
+
+
+def _run_json_collect(args):
+    """Detect games and accounts, emit one JSON document, exit.
+
+    All status/log prints from the launchers go to stderr so the JSON on
+    stdout is unambiguous for the caller.
+    """
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            steamdb = steameditor.SteamDatabase(
+                args.steam_path,
+                args.steam_api_key,
+                False,
+                appdirs.user_cache_dir("steamsync"),
+                args.use_uri,
+            )
+        except Exception as e:
+            _emit_json({"error": f"Failed to initialize SteamDatabase: {e}"})
+            return 1
+
+        try:
+            accounts = steamdb.enumerate_steam_accounts()
+        except FileNotFoundError:
+            accounts = []
+
+        games = collect_all_games(args)
+
+    _emit_json(
+        {
+            "games": [_game_to_dict(g) for g in games],
+            "accounts": [_account_to_dict(a) for a in accounts],
+            "default_steam_path": get_default_steam_path(),
+            "sources": list(defs.TAGS),
+        }
+    )
+    return 0
+
+
+def _run_json_apply(args):
+    """Read selection JSON from stdin, apply non-interactively, emit result JSON."""
+    if not args.steamid:
+        _emit_json({"error": "--steamid is required when using --json-apply"})
+        return 1
+
+    raw_selection = args.selection if args.selection is not None else sys.stdin.read()
+    try:
+        request = json.loads(raw_selection or "{}")
+    except json.JSONDecodeError as e:
+        _emit_json({"error": f"Invalid JSON in --selection / stdin: {e}"})
+        return 1
+
+    selected = set(request.get("selected_app_names") or [])
+
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            steamdb = steameditor.SteamDatabase(
+                args.steam_path,
+                args.steam_api_key,
+                args.download_art or args.download_art_all_shortcuts,
+                appdirs.user_cache_dir("steamsync"),
+                args.use_uri,
+            )
+            all_games = collect_all_games(args)
+            games = (
+                [g for g in all_games if g.app_name in selected]
+                if selected
+                else all_games
+            )
+
+            user = get_steam_user(steamdb, args.steam_path, args.steamid)
+            shortcut_file_path = user.get_shortcut_filepath(steamdb._steam_path)
+            shortcuts = _load_shortcuts(shortcut_file_path, args.init_shortcuts_file)
+            if not shortcuts:
+                _emit_json({"error": "Failed to load shortcuts.vdf"})
+                return 1
+
+            removed = 0
+            if args.remove_missing:
+                rm_result, _ = remove_missing_games_from_shortcut_file(
+                    steamdb, user, all_games, shortcuts,
+                )
+                if rm_result is not None:
+                    _, removed = rm_result
+
+            add_result, _ = add_games_to_shortcut_file(
+                steamdb, user, games, shortcuts, args.use_uri,
+                args.replace_existing, args.download_art_all_shortcuts,
+            )
+            added = add_result[1] if add_result is not None else 0
+
+            if args.download_art:
+                target = all_games if args.download_art_all_shortcuts else games
+                steamdb.download_art_multiple(user, target, should_replace_existing=False)
+
+            wrote = False
+            if added > 0 or removed > 0:
+                if not args.live_dangerously and os.path.exists(shortcut_file_path):
+                    timestamp = time.strftime("%Y%m%d-%H%M%S")
+                    backup_path = shortcut_file_path + f"-{timestamp}.bak"
+                    shutil.copy2(shortcut_file_path, backup_path)
+                new_bytes = vdf.binary_dumps(shortcuts)
+                tmp_path = shortcut_file_path + ".tmp"
+                with open(tmp_path, "wb") as f:
+                    f.write(new_bytes)
+                os.replace(tmp_path, shortcut_file_path)
+                wrote = True
+        except Exception as e:
+            _emit_json({"error": f"Apply failed: {e}"})
+            return 1
+
+    _emit_json(
+        {
+            "added": added,
+            "removed": removed,
+            "wrote_shortcuts": wrote,
+            "steamid": user.steamid,
+            "username": user.username,
+        }
+    )
+    return 0
+
+
+####################################################################################################
+# Main
+
+
 def main():
     args = parse_arguments()
 
+    if args.json_collect:
+        return _run_json_collect(args)
+    if args.json_apply:
+        return _run_json_apply(args)
 
     steamdb = steameditor.SteamDatabase(
         args.steam_path,
