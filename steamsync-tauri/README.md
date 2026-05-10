@@ -36,13 +36,35 @@ All five phases of the native Rust port are in. The app reads your launcher libr
 - Windows: MSVC C++ Build Tools + WebView2 runtime
 - macOS / Linux: standard Tauri 2 prerequisites
 
-## Build the `.exe`
+## Install the app on this PC
 
-One command. Same shape as [GitSwitch-Gui](https://github.com/biohacker0/GitSwitch-Gui).
+Same one-liner pattern as [GitSwitch](https://github.com/CareyScott/GitSwitch): build a release bundle then launch the platform installer.
+
+**Windows**
 
 ```powershell
 cd steamsync-tauri
 npm install
+npm run install:app:win
+```
+
+That runs `npm run tauri build`, then launches the generated NSIS installer (`src-tauri/target/release/bundle/nsis/*-setup.exe`). Click through it and steamsync is in your Start menu.
+
+**macOS**
+
+```sh
+cd steamsync-tauri
+npm install
+npm run install:app
+```
+
+Copies `steamsync.app` into `/Applications/`.
+
+### Just build, don't install
+
+If you only want the artifacts:
+
+```powershell
 npm run tauri build
 ```
 
@@ -50,13 +72,11 @@ What you get under `src-tauri/target/release/`:
 
 | File | What it is |
 |---|---|
-| `steamsync.exe` | **Standalone portable binary.** Double-click to run, no installer needed. ~12 MB. |
-| `bundle/msi/steamsync_0.1.0_x64_en-US.msi` | Windows MSI installer (recommended for distribution). |
-| `bundle/nsis/steamsync_0.1.0_x64-setup.exe` | NSIS installer (alternative). |
+| `steamsync.exe` | Standalone portable binary. Double-click to run, no installer needed. ~12 MB. |
+| `bundle/nsis/*-setup.exe` | NSIS installer (used by `install:app:win`). |
+| `bundle/msi/*.msi` | Windows MSI installer (alternative for distribution). |
 
 The first build is the slow one — Rust compiles ~370 crates (~10-15 min). Subsequent builds are seconds.
-
-> **Shortcut:** `npm run tauri:build` is the same as `npm run tauri build` — both forward to `tauri build`.
 
 ## Develop (hot-reload)
 
