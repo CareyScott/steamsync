@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   ConfigProvider,
@@ -109,6 +109,29 @@ export default function App() {
     [games, selected],
   );
 
+  // Reset the Apply view back to its idle state once the user leaves
+  // it *after* a successful run. Without this, navigating back to tab 3
+  // would still show the "Done!" Result card instead of letting them
+  // queue up another batch.
+  //
+  // Implemented as a key bump that forces ApplyView to remount — that
+  // wipes all of its internal state (progress, result, previews,
+  // confirming, etc.) in one go without needing to lift state up.
+  const [applyResetKey, setApplyResetKey] = useState(0);
+  const [applyDidSucceed, setApplyDidSucceed] = useState(false);
+  const prevTabRef = useRef(activeTab);
+  useEffect(() => {
+    if (
+      prevTabRef.current === "apply" &&
+      activeTab !== "apply" &&
+      applyDidSucceed
+    ) {
+      setApplyResetKey((k) => k + 1);
+      setApplyDidSucceed(false);
+    }
+    prevTabRef.current = activeTab;
+  }, [activeTab, applyDidSucceed]);
+
   const dismissWelcome = () => {
     localStorage.setItem(STORAGE.SEEN_WELCOME, "true");
     setShowWelcome(false);
@@ -214,12 +237,16 @@ export default function App() {
                 disabled: games.length === 0 || !options.steamid,
                 children: (
                   <ApplyView
+                    key={applyResetKey}
                     options={options}
                     selectedGames={selectedGames}
                     onSuccess={() => {
                       // After a successful apply, clear selection so the
-                      // next run starts fresh.
+                      // next run starts fresh, and arm the reset effect
+                      // above so leaving this tab cycles ApplyView back
+                      // to its idle state.
                       setSelected(new Set());
+                      setApplyDidSucceed(true);
                     }}
                   />
                 ),
