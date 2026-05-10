@@ -56,19 +56,15 @@ pub struct SyncOptions {
     pub remove_missing: bool,
     pub download_art: bool,
     pub egs_manifests: String,
-    pub itch_library: String,
     pub steam_path: String,
     pub steam_api_key: String,
 }
 
-/// All sources that steamsync knows how to scan.
+/// Sources the Tauri app supports. Narrower than the Python CLI on
+/// purpose — itch.io and legendary remain available only via the
+/// standalone CLI for headless users.
 pub fn known_sources() -> Vec<String> {
-    vec![
-        "legendary".to_string(),
-        "epicstore".to_string(),
-        "itchio".to_string(),
-        "xbox".to_string(),
-    ]
+    vec!["epicstore".to_string(), "xbox".to_string()]
 }
 
 /// Default steam install path for the current platform.

@@ -22,12 +22,10 @@ Add deps: `byteorder = "1"`.
 
 ## Phase 3 — Native launchers
 
-Port each launcher. Recommended order (simplest first):
+Scope narrowed: the Tauri app supports only **Epic Games Store** and **Xbox**. itch.io and legendary remain available via the standalone Python CLI for users who need them.
 
 1. **EGS** (`launchers/egs.rs`) — glob `.item` files in the manifest dir, parse with `serde_json`. ~2-3h.
-2. **legendary** (`launchers/legendary.rs`) — `std::process::Command` wrapper around `legendary list-installed --json`. ~1h.
-3. **itch** (`launchers/itch.rs`) — gunzip `receipt.json.gz`, parse the JSON; also parse `.itch.toml` for the launch action. Deps: `flate2`, `toml`. ~3-4h.
-4. **Xbox** (`launchers/xbox.rs`) — keep the existing PowerShell script (it's small and works), invoke via `Command::new("powershell.exe")`, parse the JSON output, then `quick-xml` to read `MicrosoftGame.config` for the exe + display name. ~3-4h.
+2. **Xbox** (`launchers/xbox.rs`) — keep the existing PowerShell script (it's small and works), invoke via `Command::new("powershell.exe")`, parse the JSON output, then `quick-xml` to read `MicrosoftGame.config` for the exe + display name. ~3-4h.
 
 Each gets its own integration test with a fixture directory under `tests/fixtures/`.
 

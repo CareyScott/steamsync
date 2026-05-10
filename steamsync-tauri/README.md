@@ -1,6 +1,6 @@
 # steamsync-tauri
 
-Native Tauri 2 + React 18 desktop app for syncing Epic Games Store, itch.io, Xbox, and legendary games into Steam as shortcuts.
+Native Tauri 2 + React 18 desktop app for syncing **Epic Games Store** and **Xbox** games into Steam as shortcuts. (itch.io and legendary stay supported in the standalone Python CLI for headless users.)
 
 Inspired by [GitSwitch-Gui](https://github.com/biohacker0/GitSwitch-Gui) — same shape (Tauri shell + React UI + small Rust backend), targeted at the steamsync problem domain.
 
@@ -23,7 +23,7 @@ This is a multi-phase port from the Python sidecar architecture to native Rust. 
 |---|---|
 | 1. Foundation — Steam account enum, shortcut-id, project scaffold | ✅ done |
 | 2. Binary `shortcuts.vdf` read/write codec | 🚧 next |
-| 3. Native launchers (EGS, itch, Xbox, legendary) | ⏳ pending |
+| 3. Native launchers (EGS, Xbox) | ⏳ pending |
 | 4. Steam catalog API + parallel art download | ⏳ pending |
 | 5. Wire everything to the UI, polish, installer | ⏳ pending |
 

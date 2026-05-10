@@ -43,7 +43,6 @@ export interface SyncOptions {
   remove_missing: boolean;
   download_art: boolean;
   egs_manifests: string;
-  itch_library: string;
   steam_path: string;
   steam_api_key: string;
 }
@@ -51,7 +50,5 @@ export interface SyncOptions {
 /** Human-readable label for each known storetag value. */
 export const SOURCE_LABELS: Record<string, string> = {
   epicstore: "Epic Games Store",
-  itchio: "itch.io",
   xbox: "Xbox",
-  legendary: "legendary",
 };

@@ -24,9 +24,7 @@ interface Props {
 
 const SOURCE_OPTIONS = [
   { value: "epicstore", label: "Epic Games Store" },
-  { value: "itchio", label: "itch.io" },
   { value: "xbox", label: "Xbox" },
-  { value: "legendary", label: "legendary" },
 ];
 
 export default function ConfigureView(props: Props) {
@@ -114,16 +112,6 @@ export default function ConfigureView(props: Props) {
           <Input
             value={options.egs_manifests}
             onChange={(e) => set({ egs_manifests: e.target.value })}
-          />
-        </Form.Item>
-
-        <Form.Item
-          label="itch library path"
-          help="Defaults to %APPDATA%/itch/apps when blank."
-        >
-          <Input
-            value={options.itch_library}
-            onChange={(e) => set({ itch_library: e.target.value })}
           />
         </Form.Item>
 

@@ -10,13 +10,12 @@ const { Title } = Typography;
 
 const DEFAULT_OPTIONS: SyncOptions = {
   steamid: "",
-  sources: ["epicstore", "itchio", "xbox", "legendary"],
+  sources: ["epicstore", "xbox"],
   use_uri: false,
   replace_existing: false,
   remove_missing: false,
   download_art: false,
   egs_manifests: "C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests",
-  itch_library: "",
   steam_path: "C:\\Program Files (x86)\\Steam",
   steam_api_key: "",
 };
