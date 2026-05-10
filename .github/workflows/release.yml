@@ -1,0 +1,66 @@
+name: Release
+
+# Triggers on a pushed tag like `v0.1.0`. The workflow builds the
+# Windows bundle (NSIS + MSI + portable .exe) and uploads them all to
+# a draft GitHub Release that you finalize manually.
+#
+# Cut a release from your shell:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# Or trigger it by hand from the Actions tab via workflow_dispatch.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0). The tag must already exist."
+        required: true
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Build and publish via tauri-action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Use the pushed tag, or the manually-supplied one.
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "steamsync ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseBody: |
+            Windows release build.
+
+            **Download one of:**
+            - `*-setup.exe` (NSIS installer — recommended for most users)
+            - `*.msi` (MSI installer — for enterprise / managed deploys)
+            - `steamsync.exe` (portable, double-click to run)
+
+            See the [README](../blob/master/README.md) for usage.
+          releaseDraft: true
+          prerelease: false
