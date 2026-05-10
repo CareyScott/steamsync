@@ -1,0 +1,40 @@
+[package]
+name = "steamsync"
+version = "0.1.0"
+description = "Native Tauri desktop app for adding Epic Games Store and Xbox games to Steam"
+license = "AGPL-3.0-or-later"
+edition = "2021"
+
+[lib]
+name = "steamsync_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyvalues-parser = "0.2"
+crc32fast = "1"
+thiserror = "1"
+dirs = "5"
+quick-xml = "0.36"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "fs", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+urlencoding = "2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

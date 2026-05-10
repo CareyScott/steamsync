@@ -1,3 +1,0 @@
-- define all types
-- is_installed for egs, itch, legendary
-- centralize logging
