@@ -15,19 +15,19 @@ No Python, no sidecar, no shell-out. Single Rust binary plus the bundled webview
 
 The Python CLI at [`../steamsync`](../steamsync) is preserved as a standalone CLI for headless / Linux users; the Tauri app is the primary product.
 
-## Status (in-progress port)
+## Status
 
-This is a multi-phase port from the Python sidecar architecture to native Rust. See [ROADMAP.md](./ROADMAP.md).
+All five phases of the native Rust port are in. The app reads your launcher libraries, writes Steam shortcuts, and downloads grid art entirely in Rust — no Python in the runtime path.
 
 | Phase | Status |
 |---|---|
-| 1. Foundation — Steam account enum, shortcut-id, project scaffold | ✅ done |
-| 2. Binary `shortcuts.vdf` read/write codec | 🚧 next |
-| 3. Native launchers (EGS, Xbox) | ⏳ pending |
-| 4. Steam catalog API + parallel art download | ⏳ pending |
-| 5. Wire everything to the UI, polish, installer | ⏳ pending |
+| 1. Foundation — Steam account enum, shortcut-id, scaffold | ✅ |
+| 2. Binary `shortcuts.vdf` read/write codec | ✅ |
+| 3. Native launchers (EGS, Xbox) | ✅ |
+| 4. Steam catalog API + parallel art download | ✅ |
+| 5. Apply path wired end-to-end | ✅ |
 
-Until Phase 2 lands, the **Apply** view returns `NotYetImplemented` — the app will refuse to touch your library rather than risk corrupting `shortcuts.vdf` with an incomplete codec.
+52 unit tests cover the codec round-trip, every launcher filter rule, every `guess_appid` fallback, and the account/cleanup helpers. The `shortcuts.vdf` codec is cross-validated against Python's reference `vdf` library for byte-exact output.
 
 ## Prerequisites
 
