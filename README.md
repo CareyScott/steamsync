@@ -4,6 +4,8 @@ A small, native desktop app that adds your **Epic Games Store** and **Xbox** gam
 
 Tauri 2 (Rust) + React 18 + antd. Single binary, no Python at runtime, no sidecar.
 
+> **Platform support:** Windows only. The Xbox launcher needs Windows by definition; the rest of the app may compile and run on macOS / Linux, but those targets are **untested and unsupported** — use at your own risk.
+
 ```
 React UI (antd)  →  #[tauri::command]  →  Rust modules  →  shortcuts.vdf
    TypeScript        async commands       steam/, launchers/      (binary)
@@ -32,14 +34,11 @@ npm run install:app:win
 
 That runs `tauri build`, then launches the generated NSIS installer. Click through it and steamsync is in your Start menu.
 
-### macOS
+### macOS / Linux (untested, unsupported)
 
-```sh
-npm install
-npm run install:app
-```
+`install:app` exists in `package.json` as a placeholder one-liner that copies a `.app` bundle into `/Applications/`. It has not been verified — neither the build nor the installed app are tested on these platforms. The Xbox launcher in particular will not work outside Windows.
 
-Copies `steamsync.app` into `/Applications/`.
+If you want to experiment, file issues — pull requests welcome — but expect rough edges.
 
 ### Just build, don't install
 
@@ -78,10 +77,10 @@ cargo test
 
 ## Prerequisites
 
+- **Windows 10/11** (only supported target — see top of README)
 - Node 20+
 - Rust 1.78+
-- **Windows:** MSVC C++ Build Tools + WebView2 runtime
-- **macOS / Linux:** standard Tauri 2 prerequisites
+- MSVC C++ Build Tools + WebView2 runtime
 
 ## Layout
 
@@ -123,8 +122,7 @@ cargo test
 See [ROADMAP.md](./ROADMAP.md). Headline items still open:
 
 - Backup browser (list `shortcuts.vdf-*.bak`, one-click restore)
-- Cross-platform polish (macOS / Linux build verified)
-- Installer assets (32×32 / 128×128 PNG icons for proper macOS / Linux bundles)
+- macOS / Linux are not on the roadmap (Windows is the only supported target — see top of README)
 
 ## Credits
 

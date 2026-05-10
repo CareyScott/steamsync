@@ -14,13 +14,12 @@ All five phases of the original Python → native Rust port are in. The app read
 ## Open
 
 - **Backup browser.** List `shortcuts.vdf-*.bak` files alongside their timestamps and offer a one-click restore.
-- **Cross-platform builds.** Default Steam path is already platform-aware; the Xbox launcher is Windows-only by definition, but EGS could work on macOS/Linux for the (rare) Wine setups. Bundle/install scripts need verification on macOS and a Linux target added.
-- **Icon assets.** `src-tauri/icons/icon.ico` is in place for Windows. macOS / Linux bundling wants 32×32 and 128×128 PNGs — generate from a single source PNG via `npx @tauri-apps/cli icon`.
-- **Progress streaming for art download.** Apply progress events are emitted for the per-game lookup loop but not for the inner SGDB call. Easy refactor; nice to have.
+- **Progress streaming for art download.** Apply progress events fire for the per-game outer loop but not for the inner SGDB call. Easy refactor; nice to have.
 
 ## Not planned
 
-- itch.io / legendary support. Out of scope on purpose — niche, and the original Python CLI still supports them for users who need it.
-- Auto-update. Defer until the project sees real downloads.
-- Telemetry. Explicitly not happening.
-- Mobile builds. Tauri 2 supports it via the `lib.rs`/`main.rs` split already in place, but there's no reason to target it for this domain.
+- **macOS / Linux support.** Windows-only by design — the Xbox launcher relies on PowerShell + `Get-AppxPackage`, which has no cross-platform equivalent. The repo still has `cfg(windows)` gates and a placeholder `install:app` script, but those are scaffolding for hypothetical future contributors, not a commitment.
+- **itch.io / legendary support.** Out of scope on purpose — niche, and the original Python CLI at [`jaydenmilne/steamsync`](https://github.com/jaydenmilne/steamsync) still supports them for users who need it.
+- **Auto-update.** Defer until the project sees real downloads.
+- **Telemetry.** Explicitly not happening.
+- **Mobile builds.** No reason to target it for this domain.
