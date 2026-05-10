@@ -226,26 +226,91 @@ pub async fn apply_changes(
         path_to_index.insert(format!("{}|{}", sc.exe, sc.launch_options), i);
     }
 
-    // 5. Merge in selected games.
+    // 5. Compute the effective `shortcut_id_unsigned` per selected game.
+    //    For new shortcuts this is CRC32(exe, app_name). For shortcuts
+    //    that already exist we preserve the on-disk appid so previously
+    //    downloaded grid art stays matched.
+    let mut targets: Vec<ArtTarget> = Vec::with_capacity(selected_games.len());
+    for game in &selected_games {
+        let (exe, args) = launch_target(game, opts.use_uri);
+        let key = format!("{exe}|{args}");
+        let id_u = if let Some(&i) = path_to_index.get(&key) {
+            existing[i].1.appid as u32
+        } else {
+            shortcut_id_unsigned(&exe, &game.app_name)
+        };
+        targets.push(ArtTarget {
+            app_name: game.app_name.clone(),
+            display_name: game.display_name.clone(),
+            shortcut_id_unsigned: id_u,
+        });
+    }
+
+    // 6. Download art *before* writing shortcuts so each shortcut's
+    //    `icon` field can point at the freshly-downloaded icon file.
+    //    Without this the Steam library sidebar shows an empty box for
+    //    games whose .exe Windows can't extract an icon from.
+    let mut icon_paths: HashMap<String, PathBuf> = HashMap::new();
+    if opts.download_art && !selected_games.is_empty() {
+        let sgdb = SgdbClient::new(opts.steamgriddb_api_key.clone())?;
+        let grid_folder = steam_path
+            .join("userdata")
+            .join(&user.steamid)
+            .join("config")
+            .join("grid");
+
+        let total = targets.len();
+        for (i, t) in targets.iter().enumerate() {
+            emit(ApplyEvent::DownloadingArt {
+                game: t.display_name.clone(),
+                current: i + 1,
+                total,
+            });
+        }
+
+        let result = download_art_all(&sgdb, targets.clone(), grid_folder, false).await?;
+        icon_paths = result.icon_paths;
+    }
+
+    // 7. Merge selected games into the shortcut list. The downloaded
+    //    icon path (if any) overrides the launcher-supplied icon so the
+    //    sidebar gets the high-quality SGDB image rather than an icon
+    //    extracted from the exe.
     let mut added: u32 = 0;
     for game in &selected_games {
         let (exe, args) = launch_target(game, opts.use_uri);
         let key = format!("{exe}|{args}");
+        let icon_override = icon_paths
+            .get(&game.app_name)
+            .map(|p| p.to_string_lossy().into_owned());
 
         if let Some(&i) = path_to_index.get(&key) {
             // Already present — replace only if explicitly requested.
+            // We *do* always refresh the icon path when one was just
+            // downloaded, even outside replace_existing, since that's
+            // a pure improvement with no risk of dropping user state.
             if opts.replace_existing {
                 let preserved_id = existing[i].1.appid;
-                existing[i].1 = build_shortcut(game, opts.use_uri, Some(preserved_id));
+                existing[i].1 = build_shortcut(
+                    game,
+                    opts.use_uri,
+                    Some(preserved_id),
+                    icon_override,
+                );
                 added += 1;
+            } else if let Some(icon) = icon_override {
+                existing[i].1.icon = icon;
             }
             continue;
         }
-        existing.push(("__placeholder__".into(), build_shortcut(game, opts.use_uri, None)));
+        existing.push((
+            "__placeholder__".into(),
+            build_shortcut(game, opts.use_uri, None, icon_override),
+        ));
         added += 1;
     }
 
-    // 6. Optionally remove dead shortcuts.
+    // 8. Optionally remove dead shortcuts.
     let mut removed: u32 = 0;
     if opts.remove_missing {
         let known_uris: HashSet<&str> =
@@ -255,13 +320,16 @@ pub async fn apply_changes(
         removed = (before - existing.len()) as u32;
     }
 
-    // 7. Re-index entries: Steam expects "0", "1", "2", ... contiguous.
+    // 9. Re-index entries: Steam expects "0", "1", "2", ... contiguous.
     for (i, entry) in existing.iter_mut().enumerate() {
         entry.0 = i.to_string();
     }
 
-    // 8. Write back if anything changed.
-    let wrote_shortcuts = added > 0 || removed > 0;
+    // 10. Write back if anything changed (or always, when art was
+    //     refreshed on existing shortcuts — the icon-path update needs
+    //     to land on disk).
+    let wrote_shortcuts =
+        added > 0 || removed > 0 || (!icon_paths.is_empty() && !existing.is_empty());
     if wrote_shortcuts {
         emit(ApplyEvent::WritingShortcuts);
         let root = shortcuts::build_root(&existing, &leftover_root);
@@ -269,38 +337,6 @@ pub async fn apply_changes(
         // The GUI always backs up — the "live dangerously" flag from the
         // Python CLI isn't exposed here on purpose.
         write_shortcuts_safely(&shortcuts_path, &new_bytes, true)?;
-    }
-
-    // 9. Art download (after the write so shortcut ids are stable).
-    if opts.download_art && !selected_games.is_empty() {
-        let sgdb = SgdbClient::new(opts.steamgriddb_api_key.clone())?;
-
-        let grid_folder = steam_path
-            .join("userdata")
-            .join(&user.steamid)
-            .join("config")
-            .join("grid");
-
-        let total = selected_games.len();
-        for (i, g) in selected_games.iter().enumerate() {
-            emit(ApplyEvent::DownloadingArt {
-                game: g.display_name.clone(),
-                current: i + 1,
-                total,
-            });
-        }
-
-        let targets: Vec<ArtTarget> = selected_games
-            .iter()
-            .map(|g| {
-                let (exe, _) = launch_target(g, opts.use_uri);
-                ArtTarget {
-                    display_name: g.display_name.clone(),
-                    shortcut_id_unsigned: shortcut_id_unsigned(&exe, &g.app_name),
-                }
-            })
-            .collect();
-        download_art_all(&sgdb, targets, grid_folder, false).await?;
     }
 
     Ok(ApplyResult {
@@ -370,9 +406,15 @@ fn launch_target(game: &Game, use_uri: bool) -> (String, String) {
     (game.executable_path.clone(), game.launch_arguments.clone())
 }
 
-fn build_shortcut(game: &Game, use_uri: bool, preserved_appid: Option<i32>) -> Shortcut {
+fn build_shortcut(
+    game: &Game,
+    use_uri: bool,
+    preserved_appid: Option<i32>,
+    icon_override: Option<String>,
+) -> Shortcut {
     let (exe, launch_args) = launch_target(game, use_uri);
     let appid = preserved_appid.unwrap_or_else(|| shortcut_id_signed(&exe, &game.app_name));
+    let icon = icon_override.unwrap_or_else(|| game.icon.clone());
 
     use std::collections::BTreeMap;
     let mut tags = BTreeMap::new();
@@ -384,7 +426,7 @@ fn build_shortcut(game: &Game, use_uri: bool, preserved_appid: Option<i32>) -> S
         app_name: game.display_name.clone(),
         exe,
         start_dir: game.install_folder.clone(),
-        icon: game.icon.clone(),
+        icon,
         shortcut_path: String::new(),
         launch_options: launch_args,
         is_hidden: 0,

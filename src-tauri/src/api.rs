@@ -25,11 +25,13 @@
 //! Across all selected games this is done at up to `ART_PARALLELISM`
 //! requests in flight, so a hundred-game library finishes in seconds.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use serde::Deserialize;
+use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
 
@@ -47,8 +49,21 @@ pub struct SgdbClient {
 
 #[derive(Debug, Clone)]
 pub struct ArtTarget {
+    /// Stable per-game identifier (the launcher's `app_name`). Used as
+    /// the key when returning the per-game icon paths so the caller can
+    /// look them up while building shortcuts.
+    pub app_name: String,
     pub display_name: String,
     pub shortcut_id_unsigned: u32,
+}
+
+/// What `download_art_all` returned. `count_written` is purely
+/// informational; `icon_paths` is the map the apply path uses to set
+/// each shortcut's `icon` field to the freshly-downloaded image.
+#[derive(Debug, Default)]
+pub struct ArtResult {
+    pub count_written: usize,
+    pub icon_paths: HashMap<String, PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,25 +117,35 @@ impl SgdbClient {
         list.data.into_iter().next().map(|h| h.id)
     }
 
-    /// Fetch the four art URLs for one SGDB game id. Any individual
+    /// Fetch the five art URLs for one SGDB game id. Any individual
     /// endpoint may legitimately return zero results (not every game
     /// has every art type); those become `None`.
+    ///
+    /// `big_picture` falls back to the hero URL when SGDB has no
+    /// dedicated wide grid — otherwise Steam shows an empty grey
+    /// placeholder in its "Wide Cover" slot. Using the hero looks
+    /// stretched but is consistent with the rest of the art set.
     pub async fn art_for(&self, sgdb_id: u32) -> ArtUrls {
         let grid_vertical = format!("{SGDB_BASE}/grids/game/{sgdb_id}?dimensions=600x900");
-        let grid_wide = format!("{SGDB_BASE}/grids/game/{sgdb_id}?dimensions=920x430,460x215");
+        let grid_wide =
+            format!("{SGDB_BASE}/grids/game/{sgdb_id}?dimensions=920x430,460x215");
         let heroes = format!("{SGDB_BASE}/heroes/game/{sgdb_id}");
         let logos = format!("{SGDB_BASE}/logos/game/{sgdb_id}");
-        let (box_art, hero, logo, big_picture) = futures::join!(
+        let icons = format!("{SGDB_BASE}/icons/game/{sgdb_id}");
+        let (box_art, hero, logo, wide_grid, icon) = futures::join!(
             self.first_url(&grid_vertical),
             self.first_url(&heroes),
             self.first_url(&logos),
             self.first_url(&grid_wide),
+            self.first_url(&icons),
         );
+        let big_picture = wide_grid.or_else(|| hero.clone());
         ArtUrls {
             box_art,
             hero,
             logo,
             big_picture,
+            icon,
         }
     }
 
@@ -149,59 +174,77 @@ impl SgdbClient {
     }
 }
 
-/// The four art URLs we'd write for a single game. Each is independently
+/// The five art URLs we'd write for a single game. Each is independently
 /// optional — SGDB has good coverage but not every game has every type.
 pub struct ArtUrls {
     pub box_art: Option<String>,
     pub hero: Option<String>,
     pub logo: Option<String>,
     pub big_picture: Option<String>,
+    /// Small sidebar icon. Lands at `<id>_icon.<ext>` and is then
+    /// pointed at by the shortcut's `icon` field so the Steam library
+    /// sidebar has a thumbnail instead of an empty box.
+    pub icon: Option<String>,
 }
 
 /// Download art for every target in parallel via SGDB. Returns the
-/// number of files actually written (existing files aren't re-downloaded
-/// unless `replace_existing`).
+/// number of files actually written, plus a map of `app_name → icon
+/// path` for the caller to bake into each shortcut's `icon` field.
+///
+/// Existing files aren't re-downloaded unless `replace_existing`.
 pub async fn download_art_all(
     sgdb: &SgdbClient,
     targets: Vec<ArtTarget>,
     grid_folder: PathBuf,
     replace_existing: bool,
-) -> Result<usize> {
+) -> Result<ArtResult> {
     tokio::fs::create_dir_all(&grid_folder)
         .await
         .map_err(Error::Io)?;
 
-    // For each target: lookup → resolve URLs → download each. We pipe
-    // the whole thing through buffer_unordered so we get up to
-    // ART_PARALLELISM games-in-flight without serializing on the slowest
-    // network call.
+    let icon_paths: Mutex<HashMap<String, PathBuf>> = Mutex::new(HashMap::new());
+
     let total: usize = stream::iter(targets)
         .map(|target| {
             let grid = grid_folder.clone();
+            let icon_paths = &icon_paths;
             async move {
                 let Some(sgdb_id) = sgdb.find_game_id(&target.display_name).await else {
                     return 0;
                 };
                 let urls = sgdb.art_for(sgdb_id).await;
-                download_one_game(sgdb, &target, urls, &grid, replace_existing).await
+                let (written, icon_path) =
+                    download_one_game(sgdb, &target, urls, &grid, replace_existing).await;
+                if let Some(p) = icon_path {
+                    icon_paths.lock().await.insert(target.app_name.clone(), p);
+                }
+                written
             }
         })
         .buffer_unordered(ART_PARALLELISM)
         .fold(0usize, |acc, written| async move { acc + written })
         .await;
 
-    Ok(total)
+    Ok(ArtResult {
+        count_written: total,
+        icon_paths: icon_paths.into_inner(),
+    })
 }
 
+/// Returns `(files_written, icon_path_or_none)`.
 async fn download_one_game(
     sgdb: &SgdbClient,
     target: &ArtTarget,
     urls: ArtUrls,
     grid_folder: &Path,
     replace_existing: bool,
-) -> usize {
+) -> (usize, Option<PathBuf>) {
     let id = target.shortcut_id_unsigned;
-    let plan = [
+
+    // Steam's four grid art slots. Filenames are conventional (matching
+    // Python steamsync) — Steam content-sniffs anyway so the extension
+    // doesn't have to match the actual format.
+    let grid_plan = [
         (urls.box_art, grid_folder.join(format!("{id}p.jpg"))),
         (urls.hero, grid_folder.join(format!("{id}_hero.jpg"))),
         (urls.logo, grid_folder.join(format!("{id}_logo.png"))),
@@ -212,12 +255,8 @@ async fn download_one_game(
     ];
 
     let mut written = 0;
-    for (maybe_url, dest_base) in plan {
+    for (maybe_url, dest) in grid_plan {
         let Some(url) = maybe_url else { continue };
-        // SGDB serves images at the URL's native extension; we keep our
-        // Steam-expected suffix but use the source extension if it's a
-        // known image type, so the file is well-formed.
-        let dest = with_source_extension(&dest_base, &url);
         if !replace_existing && dest.is_file() {
             continue;
         }
@@ -225,16 +264,40 @@ async fn download_one_game(
             written += 1;
         }
     }
-    written
+
+    // Icon is special: the file path goes into `shortcut.icon`, so we
+    // honor the source extension (Steam reads icons more strictly than
+    // grid art — .ico vs .png matters for some renderers).
+    let mut icon_path: Option<PathBuf> = None;
+    if let Some(url) = urls.icon {
+        let ext = url_extension(&url).unwrap_or("png");
+        let dest = grid_folder.join(format!("{id}_icon.{ext}"));
+        if replace_existing || !dest.is_file() {
+            if download_to(&sgdb.client, &url, &dest).await {
+                written += 1;
+                icon_path = Some(dest);
+            }
+        } else {
+            // Already on disk from a previous run — still surface the
+            // path so the shortcut's icon field gets pointed at it.
+            icon_path = Some(dest);
+        }
+    }
+
+    (written, icon_path)
 }
 
-/// Steam doesn't actually care about the extension on grid art files —
-/// it sniffs the content. So we keep our convention (`p.jpg`,
-/// `_logo.png`, etc.) which is what Python's steamsync writes, even if
-/// the upstream URL is a different format. Means SGDB's `.webp` files
-/// land at `_hero.jpg` etc., but Steam happily renders them.
-fn with_source_extension(dest_base: &Path, _url: &str) -> PathBuf {
-    dest_base.to_path_buf()
+/// Extract a likely image extension from a URL (e.g. `https://.../foo.png?v=2`
+/// → `png`). Returns `None` if the URL doesn't end in something that
+/// looks like an image extension.
+fn url_extension(url: &str) -> Option<&str> {
+    let cleaned = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = cleaned.rsplit('.').next()?;
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "ico" | "webp" | "gif"
+    )
+    .then_some(ext)
 }
 
 async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> bool {
