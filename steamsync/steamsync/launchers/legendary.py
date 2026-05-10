@@ -16,28 +16,27 @@ class LegendaryLauncher(launcher.Launcher):
 
     def collect_games(self) -> list[defs.GameDefinition]:
         games_dict = {}
-        # populate info for all installable games
-        games_raw_json = (
-            subprocess.Popen(
-                [self.legendary_command, "list-games", "--json"], stdout=subprocess.PIPE
+        try:
+            games_raw_json = self._run_legendary("list-games", "--json")
+            installed_raw_json = self._run_legendary("list-installed", "--json")
+        except FileNotFoundError:
+            print(
+                f"Could not find legendary executable: '{self.legendary_command}'. "
+                "Pass --legendary-command to point at it, or omit --source legendary."
             )
-            .communicate()[0]
-            .decode()
-        )
+            return []
+        except subprocess.CalledProcessError as e:
+            print(f"legendary returned exit code {e.returncode}; skipping.")
+            return []
+
         games_json = json.loads(games_raw_json)
         for entry in games_json:
             # TODO: Map other useful information, like tags?
-            games_dict[entry["app_name"]] = {"art": entry["metadata"]["keyImages"][0]}
+            key_images = entry.get("metadata", {}).get("keyImages") or []
+            art = key_images[0] if key_images else None
+            games_dict[entry["app_name"]] = {"art": art}
         games = list()
-        raw_json = (
-            subprocess.Popen(
-                [self.legendary_command, "list-installed", "--json"],
-                stdout=subprocess.PIPE,
-            )
-            .communicate()[0]
-            .decode()
-        )
-        parsed_json = json.loads(raw_json)
+        parsed_json = json.loads(installed_raw_json)
         for entry in parsed_json:
             app_name = entry["app_name"]
             launch_args = " launch " + app_name
@@ -61,6 +60,15 @@ class LegendaryLauncher(launcher.Launcher):
                 )
             )
         return games
+
+    def _run_legendary(self, *args) -> str:
+        result = subprocess.run(
+            [self.legendary_command, *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout
 
     def get_store_id(self) -> str:
         return defs.TAG_LEGENDARY

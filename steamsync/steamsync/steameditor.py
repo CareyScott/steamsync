@@ -162,7 +162,8 @@ class SteamDatabase:
         if not data:
             print("Downloading latest app list from Steam...")
             response = requests.get(
-                f"https://api.steampowered.com/IStoreService/GetAppList/v1/?key={steam_api_key}&max_results=50000"
+                f"https://api.steampowered.com/IStoreService/GetAppList/v1/?key={steam_api_key}&max_results=50000",
+                timeout=30,
             )
             apps = response.json()["response"]["apps"]
             name_to_id = {}
@@ -371,7 +372,7 @@ class SteamDatabase:
 
         _download_image(str, Path) -> (bool,str,str)
         """
-        page = requests.get(url)
+        page = requests.get(url, timeout=30)
         if page.status_code == 200:
             with dest_fname.open("wb") as f:
                 f.write(page.content)

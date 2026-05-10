@@ -4,6 +4,7 @@ import argparse
 import os
 import platform
 import pprint
+import shutil
 import time
 from pathlib import Path
 
@@ -589,14 +590,13 @@ def _load_shortcuts(shortcut_file_path, can_init_on_missing):
 
     _load_shortcuts(str, bool) -> dict, str
     """
-    if not os.path.exists(shortcut_file_path) and not can_init_on_missing:
-        message = f"Could not find shortcuts file at `{shortcut_file_path}`\nEither make a shortcut in Steam (Library ➡ ➕ Add Game ➡ Add a Non-Steam Game...) first.\nOr enable option to initialize shortcuts  file. (--init-shortcuts-file)\nAborting."
-        print(message)
-        return
-    elif can_init_on_missing:
+    if not os.path.exists(shortcut_file_path):
+        if not can_init_on_missing:
+            message = f"Could not find shortcuts file at `{shortcut_file_path}`\nEither make a shortcut in Steam (Library ➡ ➕ Add Game ➡ Add a Non-Steam Game...) first.\nOr enable option to initialize shortcuts  file. (--init-shortcuts-file)\nAborting."
+            print(message)
+            return
         shortcuts = {"shortcuts": {}}
     else:
-        # read in the shortcuts file
         with open(shortcut_file_path, "rb") as sf:
             shortcuts = vdf.binary_load(sf)
 
@@ -702,17 +702,22 @@ def main():
         print()
         if args.live_dangerously:
             print("Not backing up `shortcuts.vdf` since you enjoy danger")
-            os.remove(shortcut_file_path)
         elif os.path.exists(shortcut_file_path):
             timestamp = time.strftime("%Y%m%d-%H%M%S")
-            new_filename = shortcut_file_path + f"-{timestamp}.bak"
+            backup_path = shortcut_file_path + f"-{timestamp}.bak"
+            print(f"Backing up `shortcuts.vdf` to `{backup_path}`")
+            # Copy (don't rename) so the original stays in place until the new
+            # file is fully written. Otherwise a crash mid-write leaves the user
+            # with no shortcuts.vdf at all.
+            shutil.copy2(shortcut_file_path, backup_path)
 
-            print(f"Backing up `shortcuts.vdf` to `{new_filename}`")
-            os.rename(shortcut_file_path, new_filename)
-
+        # Write to a temp file then atomically replace, so we never leave a
+        # truncated shortcuts.vdf on disk if the process is interrupted.
         new_bytes = vdf.binary_dumps(shortcuts)
-        with open(shortcut_file_path, "wb") as shortcut_file:
+        tmp_path = shortcut_file_path + ".tmp"
+        with open(tmp_path, "wb") as shortcut_file:
             shortcut_file.write(new_bytes)
+        os.replace(tmp_path, shortcut_file_path)
 
         print("Wrote `shortcuts.vdf` successfully!")
         print()
