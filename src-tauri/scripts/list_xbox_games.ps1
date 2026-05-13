@@ -9,10 +9,6 @@ foreach ($app in $targets)
     try
     {
         $app_manifest = Get-AppxPackageManifest $app;
-        # Lots of games use $id = Game. Older games (like Prey) are App. Some
-        # games use nonsense (Supraland, GenesisNoir). So we can't exclude
-        # based on id, but we can include if it's 'Game'.
-        $id = $app_manifest.package.applications.application.id;
         $name = $app_manifest.Package.Properties.DisplayName;
         if ($name -like '*DisplayName*' -or $name -like '*ms-resource*')
         {
@@ -20,8 +16,18 @@ foreach ($app in $targets)
             continue;
         }
 
+        # When a package has multiple applications, the manifest fields are
+        # arrays. Take the first application entry so we always get a scalar.
+        $application = $app_manifest.package.applications.application;
+        if ($application -is [array]) { $application = $application[0] }
+
+        # Lots of games use $id = Game. Older games (like Prey) are App. Some
+        # games use nonsense (Supraland, GenesisNoir). So we can't exclude
+        # based on id, but we can include if it's 'Game'.
+        $id = $application.id;
+
         # Small icon looks better in steam. The Square150x150Logo is better for a desktop shortcut.
-        $icon = $app.InstallLocation + "\" + $app_manifest.Package.Applications.Application.VisualElements.Square44x44Logo;
+        $icon = $app.InstallLocation + "\" + $application.VisualElements.Square44x44Logo;
         $apps += [pscustomobject]@{
             Kind = $id
             Appid = $app.Name

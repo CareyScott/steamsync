@@ -108,6 +108,7 @@ fn item_to_game(item: EgsItem) -> Option<Game> {
         uri: Some(uri),
         storetag: "epicstore".into(),
         shortcut_id: None,
+        exe_candidates: Vec::new(),
     })
 }
 

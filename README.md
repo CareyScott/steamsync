@@ -1,6 +1,6 @@
 # steamsync
 
-A small, native desktop app that adds your **Epic Games Store** and **Xbox** games to Steam as non-Steam shortcuts — with high-quality cover art from [SteamGridDB](https://www.steamgriddb.com).
+A small, native desktop app that adds your **Epic Games Store**, **Xbox**, and **local game folders** to Steam as non-Steam shortcuts — with high-quality cover art from [SteamGridDB](https://www.steamgriddb.com).
 
 Tauri 2 (Rust) + React 18 + antd. Single binary, no Python at runtime, no sidecar.
 
@@ -13,7 +13,8 @@ React UI (antd)  →  #[tauri::command]  →  Rust modules  →  shortcuts.vdf
 
 ## Features
 
-- **Finds your installed games** across Epic Games Store and the Xbox app on Windows.
+- **Finds your installed games** across Epic Games Store, the Xbox app, and any local game folders you configure.
+- **Local folder scanning** — point steamsync at one or more folders (e.g. `D:\Games\`). Each subfolder is treated as a game; the largest `.exe` inside becomes the shortcut target. Supports one level of category subfolders (e.g. `D:\Games\RPGs\Cyberpunk 2077\`).
 - **Adds them to Steam** as non-Steam shortcuts, with `steamsync` and storefront tags so you can filter in Steam.
 - **Cover art preview** — see exactly what each shortcut will look like before you write anything.
 - **Parallel art download** from [SteamGridDB](https://www.steamgriddb.com) (8 in flight).
@@ -73,7 +74,7 @@ cd src-tauri
 cargo test
 ```
 
-42 unit tests cover the `shortcuts.vdf` codec (round-trip is byte-exact against Python's reference `vdf` library), every launcher filter rule, the name-matching helpers, and the account / shortcut-aliveness logic.
+50 unit tests cover the `shortcuts.vdf` codec (round-trip is byte-exact against Python's reference `vdf` library), every launcher filter rule (including the local folder scanner), the name-matching helpers, and the account / shortcut-aliveness logic.
 
 ## Prerequisites
 
@@ -113,8 +114,9 @@ cargo test
         │   ├── id.rs          CRC32 shortcut-id (bit-exact vs Python)
         │   └── shortcuts.rs   binary shortcuts.vdf codec
         └── launchers/
-            ├── egs.rs         Epic Games Store
-            └── xbox.rs        Xbox / Microsoft Store
+            ├── egs.rs              Epic Games Store
+            ├── local_folders.rs    local game folder scanner
+            └── xbox.rs             Xbox / Microsoft Store
 ```
 
 ## Roadmap
@@ -126,7 +128,7 @@ See [ROADMAP.md](./ROADMAP.md). Headline items still open:
 
 ## Credits
 
-- Algorithm + filter rules originally from [`jaydenmilne/steamsync`](https://github.com/jaydenmilne/steamsync) (AGPLv3). The Python CLI lives there if you need a headless option.
+- Algorithm + filter rules originally from [`jaydenmilne/steamsync`](https://github.com/jaydenmilne/steamsync) (AGPLv3). That upstream project also ships a Python CLI if you need a headless option — this repo is GUI-only.
 - Cover art via [SteamGridDB](https://www.steamgriddb.com) — community-curated, free with an API key.
 - App shape mirrored from [`CareyScott/GitSwitch`](https://github.com/CareyScott/GitSwitch).
 

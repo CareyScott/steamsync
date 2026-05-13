@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
   Card,
   Empty,
   Image,
+  Input,
   Modal,
   Progress,
   Result,
@@ -18,11 +19,13 @@ import {
   ExclamationCircleOutlined,
   PictureOutlined,
   SaveOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import {
   applyChanges,
   fetchArtPreviews,
   onApplyProgress,
+  restartSteam,
   type ApplyEvent,
   type ArtPreview,
 } from "../api";
@@ -33,6 +36,7 @@ const { Paragraph, Text } = Typography;
 interface Props {
   options: SyncOptions;
   selectedGames: Game[];
+  exeOverrides: Record<string, string>;
   onSuccess: () => void;
 }
 
@@ -61,35 +65,49 @@ function prettyLauncher(tag: string) {
   return tag === "epicstore" ? "Epic Games Store" : tag === "xbox" ? "Xbox" : tag;
 }
 
-/** Compact placeholder when SGDB has no match for a game. */
-function PreviewPlaceholder({ name }: { name: string }) {
+const PLACEHOLDER_STYLE: React.CSSProperties = {
+  borderRadius: 4,
+  background: "rgba(255,255,255,0.05)",
+  border: "1px dashed rgba(255,255,255,0.12)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+function ArtThumb({
+  url,
+  label,
+  width,
+  height,
+  fit = "cover",
+}: {
+  url: string | null | undefined;
+  label: string;
+  width: number;
+  height: number;
+  fit?: "cover" | "contain";
+}) {
+  if (url) {
+    return (
+      <Image
+        src={url}
+        width={width}
+        height={height}
+        style={{ objectFit: fit, borderRadius: 4, display: "block" }}
+        preview={{ mask: label }}
+      />
+    );
+  }
   return (
-    <div
-      style={{
-        width: 120,
-        height: 180,
-        borderRadius: 8,
-        background:
-          "linear-gradient(135deg, rgba(91,108,255,0.18), rgba(91,108,255,0.04))",
-        border: "1px dashed rgba(91,108,255,0.4)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 8,
-        textAlign: "center",
-      }}
-    >
-      <Text type="secondary" style={{ fontSize: 11 }}>
-        No art
-        <br />
-        for &ldquo;{name.slice(0, 20)}
-        {name.length > 20 ? "…" : ""}&rdquo;
+    <div style={{ ...PLACEHOLDER_STYLE, width, height }}>
+      <Text type="secondary" style={{ fontSize: 9, opacity: 0.5 }}>
+        {label}
       </Text>
     </div>
   );
 }
 
-export default function ApplyView({ options, selectedGames, onSuccess }: Props) {
+export default function ApplyView({ options, selectedGames, exeOverrides, onSuccess }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<StageMessage | null>(null);
@@ -101,10 +119,52 @@ export default function ApplyView({ options, selectedGames, onSuccess }: Props) 
   const [previews, setPreviews] = useState<ArtPreview[] | null>(null);
   const [previewsLoading, setPreviewsLoading] = useState(false);
 
+  // Inline SGDB search state for no-art cards.
+  const [editingArt, setEditingArt] = useState<string | null>(null); // app_name
+  const [editValue, setEditValue] = useState("");
+  const [retryingArt, setRetryingArt] = useState<string | null>(null); // app_name
+
+  // Maps app_name → SGDB canonical name to use as the Steam shortcut
+  // display name and as the SGDB search term during apply. Auto-populated
+  // from initial preview results; updated by "Try search…" overrides.
+  const [nameOverrides, setNameOverrides] = useState<Record<string, string>>({});
+
   const selectedAppNames = useMemo(
     () => selectedGames.map((g) => g.app_name),
     [selectedGames],
   );
+
+  const retryArtSearch = async (gameIndex: number, appName: string, searchTerm: string) => {
+    if (!searchTerm.trim()) return;
+    setEditingArt(null);
+    setRetryingArt(appName);
+    try {
+      const [result] = await fetchArtPreviews(options.steamgriddb_api_key, [searchTerm.trim()]);
+      setPreviews((prev) => {
+        if (!prev) return prev;
+        const next = [...prev];
+        next[gameIndex] = {
+          display_name: selectedGames[gameIndex].display_name,
+          sgdb_name: result?.sgdb_name ?? null,
+          box_art_url: result?.box_art_url ?? null,
+          hero_url: result?.hero_url ?? null,
+          logo_url: result?.logo_url ?? null,
+          wide_url: result?.wide_url ?? null,
+        };
+        return next;
+      });
+      // Use the canonical SGDB name as the override (falls back to search term
+      // if SGDB returned art but no name, which shouldn't happen in practice).
+      const overrideName = result?.sgdb_name ?? (result?.box_art_url ? searchTerm.trim() : null);
+      if (overrideName) {
+        setNameOverrides((prev) => ({ ...prev, [appName]: overrideName }));
+      }
+    } catch {
+      // leave the card as no-art
+    } finally {
+      setRetryingArt(null);
+    }
+  };
 
   // Trigger preview fetch when selection or art config changes.
   // The current view is the only place we hit SGDB pre-write, so this
@@ -125,7 +185,14 @@ export default function ApplyView({ options, selectedGames, onSuccess }: Props) 
     let cancelled = false;
     fetchArtPreviews(key, names)
       .then((rows) => {
-        if (!cancelled) setPreviews(rows);
+        if (cancelled) return;
+        setPreviews(rows);
+        // Auto-populate name overrides from SGDB canonical names.
+        const auto: Record<string, string> = {};
+        rows.forEach((row, i) => {
+          if (row.sgdb_name) auto[selectedGames[i].app_name] = row.sgdb_name;
+        });
+        if (Object.keys(auto).length > 0) setNameOverrides((prev) => ({ ...prev, ...auto }));
       })
       .catch(() => {
         if (!cancelled) setPreviews([]);
@@ -155,7 +222,7 @@ export default function ApplyView({ options, selectedGames, onSuccess }: Props) 
     });
 
     try {
-      const r = await applyChanges(options, selectedAppNames);
+      const r = await applyChanges(options, selectedAppNames, nameOverrides, exeOverrides);
       setResult(r);
       if (!r.error) {
         onSuccess();
@@ -224,6 +291,14 @@ export default function ApplyView({ options, selectedGames, onSuccess }: Props) 
               message="Restart Steam to see your new shortcuts."
               style={{ textAlign: "left" }}
             />
+            {options.steam_path && (
+              <Button
+                type="primary"
+                onClick={() => restartSteam(options.steam_path)}
+              >
+                Restart Steam now
+              </Button>
+            )}
           </Space>
         }
       />
@@ -282,43 +357,111 @@ export default function ApplyView({ options, selectedGames, onSuccess }: Props) 
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, 120px)",
-                  gap: 16,
-                  maxHeight: 460,
+                  gridTemplateColumns: "repeat(auto-fill, 236px)",
+                  gap: 12,
+                  maxHeight: 520,
                   overflowY: "auto",
-                  padding: "4px 0",
+                  padding: "4px 2px",
                 }}
               >
-                {previews.map((p) => (
-                  <div
-                    key={p.display_name}
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      gap: 4,
-                    }}
-                  >
-                    {p.box_art_url ? (
-                      <Image
-                        src={p.box_art_url}
-                        width={120}
-                        height={180}
-                        style={{ objectFit: "cover", borderRadius: 8 }}
-                        preview={{ mask: "View" }}
-                        fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjAiIGhlaWdodD0iMTgwIi8+"
-                      />
-                    ) : (
-                      <PreviewPlaceholder name={p.display_name} />
-                    )}
-                    <Text
-                      ellipsis={{ tooltip: p.display_name }}
-                      style={{ fontSize: 11, maxWidth: 120, textAlign: "center" }}
+                {selectedGames.map((game, i) => {
+                  const p = previews[i];
+                  const isEditing = editingArt === game.app_name;
+                  const isRetrying = retryingArt === game.app_name;
+                  const hasArt = !!p?.box_art_url;
+                  // COVER: 88×132  |  RIGHT COLUMN: 136px wide
+                  // Wide (460:215 ≈ 2.14): 136×64
+                  // Hero (3840:1240 ≈ 3.1):  136×44
+                  // Logo (contain):           136×36
+                  return (
+                    <div
+                      key={game.app_name}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 6,
+                        padding: 8,
+                        borderRadius: 8,
+                        background: "rgba(255,255,255,0.03)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                      }}
                     >
-                      {p.display_name}
-                    </Text>
-                  </div>
-                ))}
+                      {/* art row */}
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {/* cover */}
+                        {isRetrying ? (
+                          <div
+                            style={{
+                              ...PLACEHOLDER_STYLE,
+                              width: 88,
+                              height: 132,
+                              borderRadius: 4,
+                            }}
+                          >
+                            <Spin size="small" />
+                          </div>
+                        ) : (
+                          <ArtThumb url={p?.box_art_url} label="Cover" width={88} height={132} />
+                        )}
+                        {/* landscape art */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+                          <ArtThumb url={p?.wide_url} label="Wide" width={136} height={64} />
+                          <ArtThumb url={p?.hero_url} label="Background" width={136} height={44} />
+                          <ArtThumb url={p?.logo_url} label="Logo" width={136} height={36} fit="contain" />
+                        </div>
+                      </div>
+
+                      {/* name + search */}
+                      <div>
+                        <Text
+                          ellipsis={{ tooltip: nameOverrides[game.app_name] ?? game.display_name }}
+                          style={{ fontSize: 11, display: "block" }}
+                        >
+                          {nameOverrides[game.app_name] ?? game.display_name}
+                        </Text>
+                        {!hasArt && !isRetrying && (
+                          isEditing ? (
+                            <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 4 }}>
+                              <Input
+                                size="small"
+                                autoFocus
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                onPressEnter={() => retryArtSearch(i, game.app_name, editValue)}
+                                placeholder="Search SGDB…"
+                              />
+                              <Space size={4}>
+                                <Button
+                                  size="small"
+                                  type="primary"
+                                  icon={<SearchOutlined />}
+                                  onClick={() => retryArtSearch(i, game.app_name, editValue)}
+                                  disabled={!editValue.trim()}
+                                >
+                                  Search
+                                </Button>
+                                <Button size="small" onClick={() => setEditingArt(null)}>✕</Button>
+                              </Space>
+                            </Space>
+                          ) : (
+                            <Button
+                              type="link"
+                              size="small"
+                              icon={<SearchOutlined />}
+                              style={{ fontSize: 11, padding: 0, height: "auto", marginTop: 2 }}
+                              onClick={() => {
+                                setEditValue(game.display_name);
+                                setEditingArt(game.app_name);
+                              }}
+                            >
+                              Try search…
+                            </Button>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <Empty
@@ -333,7 +476,7 @@ export default function ApplyView({ options, selectedGames, onSuccess }: Props) 
                 style={{ marginTop: 8 }}
                 message={`${previews.length - previewsMatched} game${
                   previews.length - previewsMatched === 1 ? "" : "s"
-                } have no SteamGridDB match — they'll get a default Steam placeholder.`}
+                } have no SteamGridDB match — use "Try search…" to find art with a different name, or continue without.`}
               />
             )}
           </div>

@@ -12,11 +12,13 @@ mod types;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::detect_games,
             commands::apply_changes,
             commands::auto_detect_steam_path,
             commands::fetch_art_previews,
+            commands::restart_steam,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

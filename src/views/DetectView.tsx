@@ -2,9 +2,11 @@ import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  Checkbox,
   Collapse,
   Empty,
   Input,
+  Select,
   Space,
   Table,
   Tag,
@@ -14,10 +16,13 @@ import {
 } from "antd";
 import {
   CheckCircleTwoTone,
+  DeleteOutlined,
+  FolderOpenOutlined,
   PlusCircleOutlined,
   WarningTwoTone,
   ReloadOutlined,
 } from "@ant-design/icons";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { detectGames } from "../api";
 import {
   SOURCE_LABELS,
@@ -38,13 +43,13 @@ interface Props {
   setAccounts: (a: SteamAccount[]) => void;
   selected: Set<string>;
   setSelected: (s: Set<string>) => void;
+  exeOverrides: Record<string, string>;
+  setExeOverrides: (e: Record<string, string>) => void;
   onProceed: () => void;
 }
 
-// Phase 1.5: every game shows "new" because we don't yet read shortcuts.vdf
-// to compare. Phase 2 fills in real status.
-function statusFor(_game: Game): GameStatus {
-  return "new";
+function statusFor(game: Game, existing: Set<string>): GameStatus {
+  return existing.has(game.app_name) ? "synced" : "new";
 }
 
 function StatusIcon({ status }: { status: GameStatus }) {
@@ -72,9 +77,33 @@ function StatusIcon({ status }: { status: GameStatus }) {
   }
 }
 
+function exeLabel(path: string): string {
+  const parts = path.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] ?? path;
+}
+
 export default function DetectView(props: Props) {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [existingAppNames, setExistingAppNames] = useState<Set<string>>(new Set());
+
+  const set = (patch: Partial<SyncOptions>) =>
+    props.onOptionsChange({ ...props.options, ...patch });
+
+  const handleAddFolders = async () => {
+    try {
+      const result = await openFolderDialog({ directory: true, multiple: true });
+      if (!result) return;
+      const chosen = Array.isArray(result) ? result : [result];
+      const merged = [...new Set([...props.options.local_folders, ...chosen])];
+      set({ local_folders: merged });
+    } catch (e) {
+      message.error(`Could not open folder picker: ${String(e)}`);
+    }
+  };
+
+  const removeFolder = (folder: string) =>
+    set({ local_folders: props.options.local_folders.filter((f) => f !== folder) });
 
   const handleDetect = async () => {
     setLoading(true);
@@ -86,11 +115,11 @@ export default function DetectView(props: Props) {
       }
       props.setGames(result.games);
       props.setAccounts(result.accounts);
-      // Default selection: every "new" game (Phase 1.5 = all of them).
+      const existing = new Set(result.existing_app_names);
+      setExistingAppNames(existing);
+      // Default selection: every game not already in Steam.
       props.setSelected(
-        new Set(
-          result.games.filter((g) => statusFor(g) === "new").map((g) => g.app_name),
-        ),
+        new Set(result.games.filter((g) => !existing.has(g.app_name)).map((g) => g.app_name)),
       );
       if (result.accounts.length === 1 && !props.options.steamid) {
         props.onOptionsChange({
@@ -141,7 +170,7 @@ export default function DetectView(props: Props) {
   const selectAllNew = () => {
     const next = new Set(props.selected);
     for (const g of props.games) {
-      if (statusFor(g) === "new") next.add(g.app_name);
+      if (statusFor(g, existingAppNames) === "new") next.add(g.app_name);
     }
     props.setSelected(next);
   };
@@ -150,9 +179,63 @@ export default function DetectView(props: Props) {
 
   const totalSelected = props.selected.size;
   const totalGames = props.games.length;
+  const selectedUpdates = props.games.filter(
+    (g) => props.selected.has(g.app_name) && existingAppNames.has(g.app_name),
+  ).length;
+  const selectedNew = totalSelected - selectedUpdates;
+
+  const { options } = props;
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size="large">
+      <Space direction="vertical" size="small" style={{ width: "100%" }}>
+        <Checkbox.Group
+          value={options.sources}
+          onChange={(v) => set({ sources: v as string[] })}
+          options={[
+            { value: "epicstore", label: "Epic Games Store" },
+            { value: "xbox", label: "Xbox" },
+            { value: "local", label: "Local Folders" },
+          ]}
+        />
+        {options.sources.includes("local") && (
+          <Space direction="vertical" size={4} style={{ paddingLeft: 2 }}>
+            {options.local_folders.length === 0 && (
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                No folders added yet — each direct subfolder becomes one game.
+              </Text>
+            )}
+            {options.local_folders.map((folder) => (
+              <Space key={folder} size="small" align="center">
+                <FolderOpenOutlined style={{ opacity: 0.55 }} />
+                <Text
+                  style={{
+                    maxWidth: 540,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontSize: 13,
+                  }}
+                  title={folder}
+                >
+                  {folder}
+                </Text>
+                <Button
+                  type="text"
+                  danger
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  onClick={() => removeFolder(folder)}
+                />
+              </Space>
+            ))}
+            <Button size="small" icon={<FolderOpenOutlined />} onClick={handleAddFolders}>
+              Add folder…
+            </Button>
+          </Space>
+        )}
+      </Space>
+
       <Space wrap align="center">
         <Button
           type="primary"
@@ -163,16 +246,16 @@ export default function DetectView(props: Props) {
         >
           {totalGames > 0 ? "Scan again" : "Find my games"}
         </Button>
-        {props.options.steam_path && (
+        {options.steam_path && (
           <Text type="secondary">
-            Steam folder: <Text code>{props.options.steam_path}</Text>
+            Steam folder: <Text code>{options.steam_path}</Text>
           </Text>
         )}
       </Space>
 
       {totalGames === 0 && !loading && (
         <Empty
-          description="Click 'Find my games' to scan Epic Games Store and the Xbox app on this PC."
+          description="Click 'Find my games' to scan your selected sources."
           image={Empty.PRESENTED_IMAGE_SIMPLE}
         />
       )}
@@ -228,17 +311,19 @@ export default function DetectView(props: Props) {
                   </Space>
                 ),
                 children: (
+                  <div style={{ overflow: "hidden" }}>
                   <Table<Game>
                     rowKey="app_name"
                     size="small"
                     pagination={false}
                     dataSource={games}
+                    scroll={{ x: "max-content" }}
                     columns={[
                       {
                         title: "",
                         width: 40,
                         align: "center",
-                        render: (_v, g) => <StatusIcon status={statusFor(g)} />,
+                        render: (_v, g) => <StatusIcon status={statusFor(g, existingAppNames)} />,
                       },
                       {
                         title: "Name",
@@ -257,23 +342,68 @@ export default function DetectView(props: Props) {
                         ),
                       },
                       {
+                        title: "Executable",
+                        width: 240,
+                        render: (_v, g) => {
+                          if (g.storetag !== "local" || g.exe_candidates.length <= 1) return null;
+                          const current = props.exeOverrides[g.app_name] ?? g.executable_path;
+                          const isLauncher = (p: string) =>
+                            exeLabel(p).toLowerCase().includes("launcher");
+                          return (
+                            <Tooltip title="Pick which executable to launch. If the game won't open, try switching to the launcher.">
+                              <Select
+                                size="small"
+                                style={{ width: "100%" }}
+                                value={current}
+                                onChange={(v) =>
+                                  props.setExeOverrides({ ...props.exeOverrides, [g.app_name]: v })
+                                }
+                                options={g.exe_candidates.map((p, idx) => ({
+                                  value: p,
+                                  label: (
+                                    <span>
+                                      {exeLabel(p)}
+                                      {isLauncher(p) && (
+                                        <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+                                          (launcher)
+                                        </Text>
+                                      )}
+                                      {idx === 0 && !isLauncher(p) && (
+                                        <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+                                          (largest)
+                                        </Text>
+                                      )}
+                                    </span>
+                                  ),
+                                }))}
+                              />
+                            </Tooltip>
+                          );
+                        },
+                      },
+                      {
                         title: "",
-                        width: 60,
+                        width: 90,
                         align: "right",
-                        render: (_v, g) => (
-                          <Tag
-                            color={props.selected.has(g.app_name) ? "blue" : "default"}
-                            onClick={() =>
-                              toggleOne(g.app_name, !props.selected.has(g.app_name))
-                            }
-                            style={{ cursor: "pointer", margin: 0 }}
-                          >
-                            {props.selected.has(g.app_name) ? "✓ selected" : "select"}
-                          </Tag>
-                        ),
+                        render: (_v, g) => {
+                          const synced = existingAppNames.has(g.app_name);
+                          const selected = props.selected.has(g.app_name);
+                          return (
+                            <Tag
+                              color={selected ? (synced ? "orange" : "blue") : "default"}
+                              onClick={() => toggleOne(g.app_name, !selected)}
+                              style={{ cursor: "pointer", margin: 0 }}
+                            >
+                              {selected
+                                ? (synced ? "✓ update" : "✓ selected")
+                                : (synced ? "Update" : "select")}
+                            </Tag>
+                          );
+                        },
                       },
                     ]}
                   />
+                  </div>
                 ),
               };
             })}
@@ -285,7 +415,11 @@ export default function DetectView(props: Props) {
             disabled={totalSelected === 0}
             onClick={props.onProceed}
           >
-            Continue with {totalSelected} game(s) →
+            {selectedNew > 0 && selectedUpdates > 0
+              ? `Continue — ${selectedNew} new, ${selectedUpdates} update${selectedUpdates !== 1 ? "s" : ""} →`
+              : selectedUpdates > 0
+              ? `Continue — ${selectedUpdates} update${selectedUpdates !== 1 ? "s" : ""} →`
+              : `Continue with ${selectedNew} game${selectedNew !== 1 ? "s" : ""} →`}
           </Button>
         </>
       )}

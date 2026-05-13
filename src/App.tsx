@@ -35,6 +35,7 @@ const DEFAULT_OPTIONS: SyncOptions = {
   egs_manifests: "C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests",
   steam_path: "",
   steamgriddb_api_key: "",
+  local_folders: [],
 };
 
 const STORAGE = {
@@ -102,6 +103,7 @@ export default function App() {
   const [games, setGames] = useState<Game[]>([]);
   const [accounts, setAccounts] = useState<SteamAccount[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [exeOverrides, setExeOverrides] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState("detect");
 
   const selectedGames = useMemo(
@@ -212,6 +214,8 @@ export default function App() {
                     setAccounts={setAccounts}
                     selected={selected}
                     setSelected={setSelected}
+                    exeOverrides={exeOverrides}
+                    setExeOverrides={setExeOverrides}
                     onProceed={() => setActiveTab("configure")}
                   />
                 ),
@@ -240,6 +244,7 @@ export default function App() {
                     key={applyResetKey}
                     options={options}
                     selectedGames={selectedGames}
+                    exeOverrides={exeOverrides}
                     onSuccess={() => {
                       // After a successful apply, clear selection so the
                       // next run starts fresh, and arm the reset effect

@@ -78,7 +78,6 @@ struct SgdbList<T> {
 struct SgdbSearchHit {
     id: u32,
     #[serde(default)]
-    #[allow(dead_code)]
     name: String,
 }
 
@@ -106,15 +105,15 @@ impl SgdbClient {
         Ok(Self { client, api_key })
     }
 
-    /// Best-effort lookup of a display name → SGDB game id. Returns
-    /// `None` if the API errors or there are no results.
-    pub async fn find_game_id(&self, display_name: &str) -> Option<u32> {
+    /// Best-effort lookup of a display name → `(sgdb_id, canonical_name)`.
+    /// Returns `None` if the API errors or there are no results.
+    pub async fn find_game(&self, display_name: &str) -> Option<(u32, String)> {
         let url = format!(
             "{SGDB_BASE}/search/autocomplete/{}",
             urlencoding::encode(display_name)
         );
         let list: SgdbList<SgdbSearchHit> = self.get_json(&url).await.ok()?;
-        list.data.into_iter().next().map(|h| h.id)
+        list.data.into_iter().next().map(|h| (h.id, h.name))
     }
 
     /// Fetch the five art URLs for one SGDB game id. Any individual
@@ -209,7 +208,7 @@ pub async fn download_art_all(
             let grid = grid_folder.clone();
             let icon_paths = &icon_paths;
             async move {
-                let Some(sgdb_id) = sgdb.find_game_id(&target.display_name).await else {
+                let Some((sgdb_id, _)) = sgdb.find_game(&target.display_name).await else {
                     return 0;
                 };
                 let urls = sgdb.art_for(sgdb_id).await;
@@ -241,17 +240,24 @@ async fn download_one_game(
 ) -> (usize, Option<PathBuf>) {
     let id = target.shortcut_id_unsigned;
 
-    // Steam's four grid art slots. Filenames are conventional (matching
-    // Python steamsync) — Steam content-sniffs anyway so the extension
-    // doesn't have to match the actual format.
+    // Destructure so we can apply fallbacks without partial-move issues.
+    let ArtUrls { box_art, hero, logo, big_picture, icon } = urls;
+
+    // Fallbacks: use cover for logo if SGDB has none; use wide cover for
+    // background/hero if SGDB has none.
+    let hero = hero.or_else(|| big_picture.clone());
+    let logo = logo.or_else(|| box_art.clone());
+
+    // Steam grid art slots. Steam has two distinct wide-cover slots:
+    //   {id}.jpg          — library "Wide Cover" (920×430, shown in shelf/carousel)
+    //   {id}_bigpicture.* — Big Picture mode banner (same art, different slot)
+    // We write both from the same URL so both slots are filled.
     let grid_plan = [
-        (urls.box_art, grid_folder.join(format!("{id}p.jpg"))),
-        (urls.hero, grid_folder.join(format!("{id}_hero.jpg"))),
-        (urls.logo, grid_folder.join(format!("{id}_logo.png"))),
-        (
-            urls.big_picture,
-            grid_folder.join(format!("{id}_bigpicture.png")),
-        ),
+        (box_art,              grid_folder.join(format!("{id}p.jpg"))),
+        (big_picture.clone(),  grid_folder.join(format!("{id}.jpg"))),
+        (hero,                 grid_folder.join(format!("{id}_hero.jpg"))),
+        (logo,                 grid_folder.join(format!("{id}_logo.png"))),
+        (big_picture,          grid_folder.join(format!("{id}_bigpicture.png"))),
     ];
 
     let mut written = 0;
@@ -269,7 +275,7 @@ async fn download_one_game(
     // honor the source extension (Steam reads icons more strictly than
     // grid art — .ico vs .png matters for some renderers).
     let mut icon_path: Option<PathBuf> = None;
-    if let Some(url) = urls.icon {
+    if let Some(url) = icon {
         let ext = url_extension(&url).unwrap_or("png");
         let dest = grid_folder.join(format!("{id}_icon.{ext}"));
         if replace_existing || !dest.is_file() {

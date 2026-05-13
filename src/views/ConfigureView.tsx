@@ -3,7 +3,6 @@ import {
   Alert,
   Button,
   Card,
-  Checkbox,
   Collapse,
   Form,
   Input,
@@ -69,17 +68,6 @@ export default function ConfigureView(props: Props) {
           )}
         </Form.Item>
 
-        <Form.Item label="Look for games from">
-          <Checkbox.Group
-            options={[
-              { value: "epicstore", label: "Epic Games Store" },
-              { value: "xbox", label: "Xbox" },
-            ]}
-            value={options.sources}
-            onChange={(v) => set({ sources: v as string[] })}
-          />
-        </Form.Item>
-
         <Form.Item>
           <Space direction="vertical" size="middle">
             <Space>
@@ -92,13 +80,6 @@ export default function ConfigureView(props: Props) {
               {options.download_art && options.steamgriddb_api_key.trim() && (
                 <Tag color="green">key set</Tag>
               )}
-            </Space>
-            <Space>
-              <Switch
-                checked={options.replace_existing}
-                onChange={(v) => set({ replace_existing: v })}
-              />
-              <Text>Overwrite shortcuts that already exist</Text>
             </Space>
             <Space>
               <Switch

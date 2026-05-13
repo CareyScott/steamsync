@@ -31,12 +31,22 @@ use crate::types::{
     SyncOptions,
 };
 
-/// One game's box-art URL, used to show a thumbnail grid before the
-/// user commits to writing shortcuts.
+/// All art URLs for one game, returned by `fetch_art_previews` so the
+/// Apply view can show a full preview of every asset before the user
+/// commits.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtPreview {
     pub display_name: String,
+    /// Canonical SGDB game name when a match was found.
+    pub sgdb_name: Option<String>,
+    /// Vertical box art (600×900) — shown as the cover in Steam.
     pub box_art_url: Option<String>,
+    /// Hero / background image (3840×1240 or similar).
+    pub hero_url: Option<String>,
+    /// Transparent logo PNG.
+    pub logo_url: Option<String>,
+    /// Wide / big-picture grid art (920×430 or 460×215).
+    pub wide_url: Option<String>,
 }
 
 /// Frontend-visible event payloads emitted during apply_changes. Listen
@@ -140,17 +150,22 @@ pub async fn fetch_art_previews(
         .map(|name| {
             let sgdb = &sgdb;
             async move {
-                let box_art_url = match sgdb.find_game_id(&name).await {
-                    Some(id) => sgdb.art_for(id).await.box_art,
-                    None => None,
+                let (urls, sgdb_name) = match sgdb.find_game(&name).await {
+                    Some((id, canonical)) => (Some(sgdb.art_for(id).await), Some(canonical)),
+                    None => (None, None),
                 };
-                ArtPreview {
-                    display_name: name,
-                    box_art_url,
-                }
+                let (box_art_url, hero_url, logo_url, wide_url) = match urls {
+                    Some(u) => {
+                        let hero = u.hero.or_else(|| u.big_picture.clone());
+                        let logo = u.logo.or_else(|| u.box_art.clone());
+                        (u.box_art, hero, logo, u.big_picture)
+                    }
+                    None => (None, None, None, None),
+                };
+                ArtPreview { display_name: name, sgdb_name, box_art_url, hero_url, logo_url, wide_url }
             }
         })
-        .buffer_unordered(8)
+        .buffered(8)
         .collect()
         .await;
     Ok(previews)
@@ -161,11 +176,62 @@ pub async fn detect_games(opts: SyncOptions) -> Result<DetectResult> {
     let steam_path = resolve_steam_path(&opts);
     let accounts = steam::enumerate_accounts(&steam_path)?;
     let games = launchers::collect_games(&opts)?;
+
+    // Determine which games are already in the user's Steam shortcuts.vdf.
+    // We use the same exe|args key as apply_changes so the match is exact.
+    let existing_app_names = {
+        // Pick the account to check: explicit steamid > only account > skip.
+        let sid = if !opts.steamid.is_empty() {
+            Some(opts.steamid.as_str())
+        } else if accounts.len() == 1 {
+            Some(accounts[0].steamid.as_str())
+        } else {
+            None
+        };
+
+        sid.and_then(|sid| {
+            let path = steam_path
+                .join("userdata")
+                .join(sid)
+                .join("config")
+                .join("shortcuts.vdf");
+            let bytes = std::fs::read(&path).ok()?;
+            let parsed = shortcuts::parse(&bytes).ok()?;
+            let (existing, _) = shortcuts::extract_shortcuts(&parsed).ok()?;
+            // Primary key: exe|args (path-based, backward compatible).
+            let keys: HashSet<String> = existing
+                .iter()
+                .map(|(_, sc)| format!("{}|{}", unquote(&sc.exe), unquote(&sc.launch_options)))
+                .collect();
+            // Secondary: tag "2" (stored app_name) — catches games whose exe
+            // was changed via the override picker since the last apply run.
+            let tag2_set: HashSet<String> = existing
+                .iter()
+                .filter(|(_, sc)| sc.tags.values().any(|v| v == "steamsync"))
+                .filter_map(|(_, sc)| sc.tags.get("2").cloned())
+                .collect();
+            let matched = games
+                .iter()
+                .filter(|g| {
+                    if tag2_set.contains(&g.app_name) {
+                        return true;
+                    }
+                    let (exe, args) = launch_target(g, opts.use_uri);
+                    keys.contains(&format!("{exe}|{args}"))
+                })
+                .map(|g| g.app_name.clone())
+                .collect();
+            Some(matched)
+        })
+        .unwrap_or_default()
+    };
+
     Ok(DetectResult {
         games,
         accounts,
         default_steam_path: default_steam_path(),
         sources: known_sources(),
+        existing_app_names,
     })
 }
 
@@ -174,6 +240,8 @@ pub async fn apply_changes(
     window: Window,
     opts: SyncOptions,
     selected_app_names: Vec<String>,
+    name_overrides: HashMap<String, String>,
+    exe_overrides: HashMap<String, String>,
 ) -> Result<ApplyResult> {
     let emit = |event: ApplyEvent| {
         // Failure to emit shouldn't fail the apply — log and continue.
@@ -200,10 +268,24 @@ pub async fn apply_changes(
     }
     let all_games = launchers::collect_games(&opts)?;
     let selected: HashSet<&str> = selected_app_names.iter().map(String::as_str).collect();
-    let selected_games: Vec<&Game> = all_games
+    // Apply name and exe overrides: clone and patch any game that has overrides.
+    let selected_owned: Vec<Game> = all_games
         .iter()
         .filter(|g| selected.contains(g.app_name.as_str()))
+        .map(|g| {
+            let display_name = name_overrides
+                .get(&g.app_name)
+                .cloned()
+                .unwrap_or_else(|| g.display_name.clone());
+            let (executable_path, icon) = if let Some(exe) = exe_overrides.get(&g.app_name) {
+                (exe.clone(), exe.clone())
+            } else {
+                (g.executable_path.clone(), g.icon.clone())
+            };
+            Game { display_name, executable_path, icon, ..g.clone() }
+        })
         .collect();
+    let selected_games: Vec<&Game> = selected_owned.iter().collect();
 
     // 3. Load existing shortcuts.vdf.
     let shortcuts_path = steam_path
@@ -219,11 +301,25 @@ pub async fn apply_changes(
         (Vec::<(String, Shortcut)>::new(), Vec::<(String, Value)>::new())
     };
 
-    // 4. Index existing shortcuts by "{exe}|{launch_options}" — the same
-    // key the Python implementation uses to dedupe.
+    // 4. Build two indexes over existing shortcuts.
+    //
+    // Primary: "{exe}|{launch_options}" — path-based dedup (backward compat).
+    // Secondary: tag "2" value → index, steamsync entries only. Tag "2" stores
+    // the launcher's canonical app_name so we can find a shortcut even when
+    // the user has changed the exe via the override picker (which changes the
+    // primary key but not the game identity).
     let mut path_to_index: HashMap<String, usize> = HashMap::new();
+    let mut appname_to_index: HashMap<String, usize> = HashMap::new();
     for (i, (_, sc)) in existing.iter().enumerate() {
-        path_to_index.insert(format!("{}|{}", sc.exe, sc.launch_options), i);
+        // Normalise by stripping quotes — shortcuts written by Steam or by
+        // older runs of this app may or may not quote paths. `launch_target`
+        // always returns unquoted strings, so we match on the unquoted form.
+        path_to_index.insert(format!("{}|{}", unquote(&sc.exe), unquote(&sc.launch_options)), i);
+        if sc.tags.values().any(|v| v == "steamsync") {
+            if let Some(stored_app_name) = sc.tags.get("2") {
+                appname_to_index.insert(stored_app_name.clone(), i);
+            }
+        }
     }
 
     // 5. Compute the effective `shortcut_id_unsigned` per selected game.
@@ -234,7 +330,10 @@ pub async fn apply_changes(
     for game in &selected_games {
         let (exe, args) = launch_target(game, opts.use_uri);
         let key = format!("{exe}|{args}");
-        let id_u = if let Some(&i) = path_to_index.get(&key) {
+        let existing_idx = appname_to_index
+            .get(&game.app_name)
+            .or_else(|| path_to_index.get(&key));
+        let id_u = if let Some(&i) = existing_idx {
             existing[i].1.appid as u32
         } else {
             shortcut_id_unsigned(&exe, &game.app_name)
@@ -276,6 +375,15 @@ pub async fn apply_changes(
     //    icon path (if any) overrides the launcher-supplied icon so the
     //    sidebar gets the high-quality SGDB image rather than an icon
     //    extracted from the exe.
+    //
+    // Dedup rules:
+    //   • steamsync-owned shortcut found (by app_name tag OR by exe|args):
+    //     always update in-place — never create a second entry.
+    //   • shortcut found but NOT owned by steamsync (e.g. a game the user
+    //     added to Steam manually, or a native Steam shortcut): skip entirely
+    //     — don't overwrite it, don't duplicate it.
+    //   • no match: add as a new entry and register both indexes so a second
+    //     selected game resolving to the same exe|args cannot produce a dupe.
     let mut added: u32 = 0;
     for game in &selected_games {
         let (exe, args) = launch_target(game, opts.use_uri);
@@ -284,29 +392,34 @@ pub async fn apply_changes(
             .get(&game.app_name)
             .map(|p| p.to_string_lossy().into_owned());
 
-        if let Some(&i) = path_to_index.get(&key) {
-            // Already present — replace only if explicitly requested.
-            // We *do* always refresh the icon path when one was just
-            // downloaded, even outside replace_existing, since that's
-            // a pure improvement with no risk of dropping user state.
-            if opts.replace_existing {
+        // Check secondary index first: handles the case where the user picked
+        // a different exe via the override picker (key changes, identity doesn't).
+        let existing_idx = appname_to_index
+            .get(&game.app_name)
+            .or_else(|| path_to_index.get(&key))
+            .copied();
+
+        if let Some(i) = existing_idx {
+            let is_ours = existing[i].1.tags.values().any(|v| v == "steamsync");
+            if is_ours {
+                // Our shortcut — always refresh it so settings/exe/art stay current.
                 let preserved_id = existing[i].1.appid;
-                existing[i].1 = build_shortcut(
-                    game,
-                    opts.use_uri,
-                    Some(preserved_id),
-                    icon_override,
-                );
+                existing[i].1 = build_shortcut(game, opts.use_uri, Some(preserved_id), icon_override);
                 added += 1;
-            } else if let Some(icon) = icon_override {
-                existing[i].1.icon = icon;
             }
+            // Not ours (added by Steam or user) — leave it untouched, no duplicate.
             continue;
         }
+
+        // Genuinely new — add it and register in both indexes so a second
+        // selected game with the same resolved exe cannot create a duplicate.
+        let new_idx = existing.len();
         existing.push((
             "__placeholder__".into(),
             build_shortcut(game, opts.use_uri, None, icon_override),
         ));
+        path_to_index.insert(key, new_idx);
+        appname_to_index.insert(game.app_name.clone(), new_idx);
         added += 1;
     }
 
@@ -346,6 +459,37 @@ pub async fn apply_changes(
         steamid: user.steamid.clone(),
         username: user.username.clone(),
     })
+}
+
+/// Kill Steam and re-launch it from the configured Steam path. Used by
+/// the success screen so the user's new shortcuts appear immediately
+/// without having to manually restart Steam.
+#[tauri::command]
+pub async fn restart_steam(steam_path: String) -> Result<()> {
+    use std::time::Duration;
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // Kill any running Steam process. Ignore errors — Steam may not be running.
+    let mut kill = std::process::Command::new("taskkill");
+    kill.args(["/f", "/im", "steam.exe"]);
+    #[cfg(windows)]
+    kill.creation_flags(CREATE_NO_WINDOW);
+    let _ = kill.output();
+
+    // Give it a moment to fully exit before re-launching.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let exe = PathBuf::from(&steam_path).join("steam.exe");
+    if exe.is_file() {
+        let mut start = std::process::Command::new(&exe);
+        #[cfg(windows)]
+        start.creation_flags(CREATE_NO_WINDOW);
+        let _ = start.spawn();
+    }
+    Ok(())
 }
 
 // ----------------------------------------------------------------------
@@ -406,26 +550,51 @@ fn launch_target(game: &Game, use_uri: bool) -> (String, String) {
     (game.executable_path.clone(), game.launch_arguments.clone())
 }
 
+/// Wrap a filesystem path in double-quotes so Steam can parse it when
+/// it contains spaces. URIs and already-quoted strings are returned as-is.
+fn quote_path(s: &str) -> String {
+    if s.starts_with('"') || s.contains("://") || s.to_lowercase().ends_with("explorer.exe") {
+        s.to_string()
+    } else {
+        format!("\"{s}\"")
+    }
+}
+
+/// Strip surrounding double-quotes for consistent key comparison.
+/// Existing shortcuts written by Steam or other tools may quote paths;
+/// ours may not have in older runs. Normalise before comparing.
+fn unquote(s: &str) -> &str {
+    s.trim_matches('"')
+}
+
 fn build_shortcut(
     game: &Game,
     use_uri: bool,
     preserved_appid: Option<i32>,
     icon_override: Option<String>,
 ) -> Shortcut {
-    let (exe, launch_args) = launch_target(game, use_uri);
-    let appid = preserved_appid.unwrap_or_else(|| shortcut_id_signed(&exe, &game.app_name));
+    let (raw_exe, launch_args) = launch_target(game, use_uri);
+    // The shortcut_id must be computed from the unquoted path so it is
+    // stable regardless of whether we quoted on a previous run.
+    let appid = preserved_appid.unwrap_or_else(|| shortcut_id_signed(&raw_exe, &game.app_name));
+    let exe = quote_path(&raw_exe);
+    let start_dir = quote_path(&game.install_folder);
     let icon = icon_override.unwrap_or_else(|| game.icon.clone());
 
     use std::collections::BTreeMap;
     let mut tags = BTreeMap::new();
     tags.insert("0".into(), "steamsync".into());
     tags.insert("1".into(), game.storetag.clone());
+    // Tag "2" stores the launcher's canonical app_name so apply_changes can
+    // find this shortcut even when the exe path changes (e.g. user picks a
+    // different executable via the override picker between runs).
+    tags.insert("2".into(), game.app_name.clone());
 
     Shortcut {
         appid,
         app_name: game.display_name.clone(),
         exe,
-        start_dir: game.install_folder.clone(),
+        start_dir,
         icon,
         shortcut_path: String::new(),
         launch_options: launch_args,

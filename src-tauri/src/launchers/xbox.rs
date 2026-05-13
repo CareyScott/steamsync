@@ -16,6 +16,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use serde::Deserialize;
@@ -25,22 +28,40 @@ use crate::types::Game;
 
 const PS_SCRIPT: &str = include_str!("../../scripts/list_xbox_games.ps1");
 
+// Suppresses the console window that would otherwise flash whenever a
+// windowed release build spawns a console subprocess like powershell.exe.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// One row from the PowerShell script's `ConvertTo-Json` output.
+///
+/// All fields are `Option<String>` because PowerShell serialises missing or
+/// null manifest attributes as JSON `null`, which cannot be deserialised into
+/// a plain `String`. Fields that are essential for a usable shortcut (Aumid,
+/// InstallLocation) cause the entry to be skipped when absent; the rest fall
+/// back to empty strings.
 #[derive(Debug, Deserialize)]
 #[allow(non_snake_case)]
 struct PsApp {
-    Kind: String,
-    Aumid: String,
-    PrettyName: String,
-    Icon: String,
-    InstallLocation: String,
+    #[serde(default)]
+    Kind: Option<String>,
+    #[serde(default)]
+    Aumid: Option<String>,
+    #[serde(default)]
+    PrettyName: Option<String>,
+    #[serde(default)]
+    Icon: Option<String>,
+    #[serde(default)]
+    InstallLocation: Option<String>,
 }
 
 pub fn collect() -> Result<Vec<Game>> {
-    let output = match Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", PS_SCRIPT])
-        .output()
-    {
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", PS_SCRIPT]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = match cmd.output() {
         Ok(o) => o,
         Err(e) => {
             return Err(Error::VdfParse(format!(
@@ -88,13 +109,20 @@ pub fn collect() -> Result<Vec<Game>> {
 }
 
 fn app_to_game(app: PsApp) -> Option<Game> {
-    let install = PathBuf::from(&app.InstallLocation);
+    // Without these two fields we can't build a usable shortcut.
+    let aumid = app.Aumid?;
+    let install_location = app.InstallLocation?;
+    let pretty_name = app.PrettyName.unwrap_or_default();
+    let icon_str = app.Icon.unwrap_or_default();
+    let kind = app.Kind.unwrap_or_default();
+
+    let install = PathBuf::from(&install_location);
     let config = install.join("MicrosoftGame.config");
     let (exe_name, display_name) = if config.is_file() {
-        read_microsoft_game_config(&config).unwrap_or((None, app.PrettyName.clone()))
+        read_microsoft_game_config(&config).unwrap_or((None, pretty_name.clone()))
     } else {
         let manifest = install.join("AppxManifest.xml");
-        let is_kind_game = app.Kind == "Game";
+        let is_kind_game = kind == "Game";
         let is_game = is_kind_game
             || (manifest.is_file()
                 && is_game_judging_by_manifest(&manifest).unwrap_or(false));
@@ -102,7 +130,7 @@ fn app_to_game(app: PsApp) -> Option<Game> {
             return None;
         }
         // Older games: launch by AUMID, no exe path needed.
-        (None, app.PrettyName.clone())
+        (None, pretty_name.clone())
     };
 
     // If we have an exe path, validate it exists.
@@ -126,9 +154,9 @@ fn app_to_game(app: PsApp) -> Option<Game> {
 
     // Pick a usable icon: prefer the one the script gave us, fall back to
     // the targetsize-48 variant (Spiritfarer), then the exe.
-    let icon_path = PathBuf::from(&app.Icon);
+    let icon_path = PathBuf::from(&icon_str);
     let icon = if icon_path.is_file() {
-        app.Icon.clone()
+        icon_str.clone()
     } else {
         let ext = icon_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let alt = icon_path.with_file_name(format!(
@@ -143,14 +171,14 @@ fn app_to_game(app: PsApp) -> Option<Game> {
         } else if !exe.is_empty() {
             exe.clone()
         } else {
-            app.Icon.clone()
+            icon_str
         }
     };
 
-    let uri = format!("shell:appsFolder\\{}", app.Aumid);
+    let uri = format!("shell:appsFolder\\{aumid}");
 
     Some(Game {
-        app_name: app.Aumid,
+        app_name: aumid,
         display_name,
         executable_path: exe,
         install_folder: working_dir,
@@ -159,6 +187,7 @@ fn app_to_game(app: PsApp) -> Option<Game> {
         uri: Some(uri),
         storetag: "xbox".into(),
         shortcut_id: None,
+        exe_candidates: Vec::new(),
     })
 }
 

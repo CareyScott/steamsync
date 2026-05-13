@@ -14,6 +14,10 @@ pub struct Game {
     pub uri: Option<String>,
     pub storetag: String,
     pub shortcut_id: Option<i64>,
+    /// Alternative executables the user can pick from (local games only).
+    /// Sorted largest-first; first entry is the recommended default.
+    #[serde(default)]
+    pub exe_candidates: Vec<String>,
 }
 
 /// A Steam account discovered on this machine.
@@ -30,6 +34,9 @@ pub struct DetectResult {
     pub accounts: Vec<SteamAccount>,
     pub default_steam_path: String,
     pub sources: Vec<String>,
+    /// `app_name` values of games already present in the Steam library as
+    /// shortcuts. Empty when no Steam account can be determined yet.
+    pub existing_app_names: Vec<String>,
 }
 
 /// Result of running the Apply phase.
@@ -60,13 +67,16 @@ pub struct SyncOptions {
     /// SteamGridDB API key (https://www.steamgriddb.com). Required when
     /// download_art is true.
     pub steamgriddb_api_key: String,
+    /// Root folders to scan for local games (one subfolder per game).
+    #[serde(default)]
+    pub local_folders: Vec<String>,
 }
 
 /// Sources the Tauri app supports. Narrower than the Python CLI on
 /// purpose — itch.io and legendary remain available only via the
 /// standalone CLI for headless users.
 pub fn known_sources() -> Vec<String> {
-    vec!["epicstore".to_string(), "xbox".to_string()]
+    vec!["epicstore".to_string(), "xbox".to_string(), "local".to_string()]
 }
 
 /// Default steam install path for the current platform.

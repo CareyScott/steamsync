@@ -9,10 +9,14 @@ export async function detectGames(opts: SyncOptions): Promise<DetectResult> {
 export async function applyChanges(
   opts: SyncOptions,
   selectedAppNames: string[],
+  nameOverrides: Record<string, string>,
+  exeOverrides: Record<string, string>,
 ): Promise<ApplyResult> {
   return await invoke<ApplyResult>("apply_changes", {
     opts,
     selectedAppNames,
+    nameOverrides,
+    exeOverrides,
   });
 }
 
@@ -20,9 +24,17 @@ export async function autoDetectSteamPath(): Promise<string | null> {
   return await invoke<string | null>("auto_detect_steam_path");
 }
 
+export async function restartSteam(steamPath: string): Promise<void> {
+  return await invoke<void>("restart_steam", { steamPath });
+}
+
 export interface ArtPreview {
   display_name: string;
+  sgdb_name: string | null;
   box_art_url: string | null;
+  hero_url: string | null;
+  logo_url: string | null;
+  wide_url: string | null;
 }
 
 /** Fetch SGDB box-art URLs for a list of display names. Used to render
