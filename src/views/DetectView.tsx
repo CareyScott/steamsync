@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
-  Checkbox,
   Collapse,
   Empty,
   Input,
@@ -21,6 +20,7 @@ import {
   PlusCircleOutlined,
   WarningTwoTone,
   ReloadOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { detectGames } from "../api";
@@ -48,6 +48,12 @@ interface Props {
   onProceed: () => void;
 }
 
+const SOURCES: { value: string; label: string }[] = [
+  { value: "epicstore", label: "Epic Games" },
+  { value: "xbox", label: "Xbox" },
+  { value: "local", label: "Local Folders" },
+];
+
 function statusFor(game: Game, existing: Set<string>): GameStatus {
   return existing.has(game.app_name) ? "synced" : "new";
 }
@@ -57,19 +63,19 @@ function StatusIcon({ status }: { status: GameStatus }) {
     case "synced":
       return (
         <Tooltip title="Already in Steam">
-          <CheckCircleTwoTone twoToneColor="#52c41a" />
+          <CheckCircleTwoTone twoToneColor="#a4d007" />
         </Tooltip>
       );
     case "broken":
       return (
         <Tooltip title="Executable missing or unreadable">
-          <WarningTwoTone twoToneColor="#faad14" />
+          <WarningTwoTone twoToneColor="#e0a225" />
         </Tooltip>
       );
     case "new":
       return (
         <Tooltip title="Will be added to Steam">
-          <PlusCircleOutlined style={{ color: "#1677ff" }} />
+          <PlusCircleOutlined style={{ color: "#66c0f4" }} />
         </Tooltip>
       );
     default:
@@ -89,6 +95,15 @@ export default function DetectView(props: Props) {
 
   const set = (patch: Partial<SyncOptions>) =>
     props.onOptionsChange({ ...props.options, ...patch });
+
+  const toggleSource = (value: string) => {
+    const has = props.options.sources.includes(value);
+    set({
+      sources: has
+        ? props.options.sources.filter((s) => s !== value)
+        : [...props.options.sources, value],
+    });
+  };
 
   const handleAddFolders = async () => {
     try {
@@ -117,7 +132,6 @@ export default function DetectView(props: Props) {
       props.setAccounts(result.accounts);
       const existing = new Set(result.existing_app_names);
       setExistingAppNames(existing);
-      // Default selection: every game not already in Steam.
       props.setSelected(
         new Set(result.games.filter((g) => !existing.has(g.app_name)).map((g) => g.app_name)),
       );
@@ -139,7 +153,6 @@ export default function DetectView(props: Props) {
     }
   };
 
-  // Group games by storetag, filtered by search.
   const grouped = useMemo(() => {
     const q = search.trim().toLowerCase();
     const by: Record<string, Game[]> = {};
@@ -188,82 +201,150 @@ export default function DetectView(props: Props) {
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size="large">
-      <Space direction="vertical" size="small" style={{ width: "100%" }}>
-        <Checkbox.Group
-          value={options.sources}
-          onChange={(v) => set({ sources: v as string[] })}
-          options={[
-            { value: "epicstore", label: "Epic Games Store" },
-            { value: "xbox", label: "Xbox" },
-            { value: "local", label: "Local Folders" },
-          ]}
-        />
-        {options.sources.includes("local") && (
-          <Space direction="vertical" size={4} style={{ paddingLeft: 2 }}>
-            {options.local_folders.length === 0 && (
-              <Text type="secondary" style={{ fontSize: 13 }}>
-                No folders added yet — each direct subfolder becomes one game.
-              </Text>
-            )}
-            {options.local_folders.map((folder) => (
-              <Space key={folder} size="small" align="center">
-                <FolderOpenOutlined style={{ opacity: 0.55 }} />
-                <Text
-                  style={{
-                    maxWidth: 540,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontSize: 13,
-                  }}
-                  title={folder}
-                >
-                  {folder}
-                </Text>
-                <Button
-                  type="text"
-                  danger
-                  size="small"
-                  icon={<DeleteOutlined />}
-                  onClick={() => removeFolder(folder)}
-                />
-              </Space>
-            ))}
-            <Button size="small" icon={<FolderOpenOutlined />} onClick={handleAddFolders}>
-              Add folder…
-            </Button>
-          </Space>
-        )}
-      </Space>
+      <section className="ss-panel">
+        <header className="ss-panel-header">
+          <span className="ss-panel-bar" />
+          <h2 className="ss-panel-title">Sources</h2>
+        </header>
 
-      <Space wrap align="center">
-        <Button
-          type="primary"
-          size="large"
-          loading={loading}
-          icon={<ReloadOutlined />}
-          onClick={handleDetect}
-        >
-          {totalGames > 0 ? "Scan again" : "Find my games"}
-        </Button>
-        {options.steam_path && (
-          <Text type="secondary">
-            Steam folder: <Text code>{options.steam_path}</Text>
-          </Text>
+        <div className="ss-source-row">
+          {SOURCES.map((src) => {
+            const checked = options.sources.includes(src.value);
+            return (
+              <button
+                key={src.value}
+                type="button"
+                className={`ss-source-pill ${checked ? "checked" : ""}`}
+                onClick={() => toggleSource(src.value)}
+              >
+                <span className="dot" />
+                {src.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {options.sources.includes("local") && (
+          <div style={{ marginTop: 16 }}>
+            <h3 className="ss-section-heading">Local Folders</h3>
+            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              {options.local_folders.length === 0 && (
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  No folders added yet — each direct subfolder becomes one game.
+                </Text>
+              )}
+              {options.local_folders.map((folder) => (
+                <div
+                  key={folder}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "6px 10px",
+                    background: "var(--ss-bg-elevated)",
+                    border: "1px solid var(--ss-border)",
+                    borderRadius: 4,
+                  }}
+                >
+                  <FolderOpenOutlined style={{ color: "var(--ss-accent)" }} />
+                  <Text
+                    style={{
+                      flex: 1,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      fontSize: 13,
+                    }}
+                    title={folder}
+                  >
+                    {folder}
+                  </Text>
+                  <Button
+                    type="text"
+                    danger
+                    size="small"
+                    icon={<DeleteOutlined />}
+                    onClick={() => removeFolder(folder)}
+                  />
+                </div>
+              ))}
+              <Button size="small" icon={<FolderOpenOutlined />} onClick={handleAddFolders}>
+                Add folder…
+              </Button>
+            </Space>
+          </div>
         )}
-      </Space>
+
+        <div style={{ marginTop: 20, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <Button
+            type="primary"
+            size="large"
+            loading={loading}
+            icon={<ReloadOutlined />}
+            onClick={handleDetect}
+          >
+            {totalGames > 0 ? "Scan Again" : "Scan for Games"}
+          </Button>
+          {options.steam_path && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Steam folder:{" "}
+              <Text code style={{ fontSize: 11 }}>
+                {options.steam_path}
+              </Text>
+            </Text>
+          )}
+        </div>
+      </section>
 
       {totalGames === 0 && !loading && (
-        <Empty
-          description="Click 'Find my games' to scan your selected sources."
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-        />
+        <div className="ss-panel" style={{ textAlign: "center", padding: "40px 24px" }}>
+          <Empty
+            description={
+              <Text type="secondary" style={{ letterSpacing: "0.04em" }}>
+                Ready when you are. Hit{" "}
+                <Text strong style={{ color: "var(--ss-accent)" }}>
+                  Scan for Games
+                </Text>{" "}
+                to begin.
+              </Text>
+            }
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        </div>
       )}
 
       {totalGames > 0 && (
-        <>
-          <Space wrap>
-            <Input.Search
+        <section className="ss-panel">
+          <header className="ss-panel-header">
+            <span className="ss-panel-bar" />
+            <h2 className="ss-panel-title">Library</h2>
+            <span style={{ flex: 1 }} />
+            <Text
+              type="secondary"
+              style={{
+                fontSize: 11,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+              }}
+            >
+              <Text strong style={{ color: "var(--ss-accent)", fontSize: 14 }}>
+                {totalSelected}
+              </Text>{" "}
+              / {totalGames} selected
+            </Text>
+          </header>
+
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              marginBottom: 16,
+              flexWrap: "wrap",
+              alignItems: "center",
+            }}
+          >
+            <Input
+              prefix={<SearchOutlined style={{ color: "var(--ss-text-muted)" }} />}
               placeholder="Filter by name…"
               allowClear
               style={{ width: 320 }}
@@ -272,10 +353,7 @@ export default function DetectView(props: Props) {
             />
             <Button onClick={selectAllNew}>Select all new</Button>
             <Button onClick={clearAll}>Clear</Button>
-            <Text type="secondary">
-              {totalSelected} of {totalGames} selected
-            </Text>
-          </Space>
+          </div>
 
           <Collapse
             defaultActiveKey={Object.keys(grouped)}
@@ -287,10 +365,26 @@ export default function DetectView(props: Props) {
                 key: tag,
                 label: (
                   <Space>
-                    <strong>{SOURCE_LABELS[tag] ?? tag}</strong>
+                    <span
+                      style={{
+                        fontFamily: '"Rajdhani", Inter, sans-serif',
+                        fontWeight: 600,
+                        fontSize: 14,
+                        letterSpacing: "0.06em",
+                        textTransform: "uppercase",
+                        color: "var(--ss-text-bright)",
+                      }}
+                    >
+                      {SOURCE_LABELS[tag] ?? tag}
+                    </span>
                     <Badge
                       count={`${selectedInGroup} / ${games.length}`}
-                      style={{ backgroundColor: "#1677ff" }}
+                      style={{
+                        backgroundColor: "var(--ss-bg-base)",
+                        color: "var(--ss-accent)",
+                        boxShadow: "inset 0 0 0 1px var(--ss-accent)",
+                        fontFamily: '"Rajdhani", Inter, sans-serif',
+                      }}
                     />
                   </Space>
                 ),
@@ -312,97 +406,106 @@ export default function DetectView(props: Props) {
                 ),
                 children: (
                   <div style={{ overflow: "hidden" }}>
-                  <Table<Game>
-                    rowKey="app_name"
-                    size="small"
-                    pagination={false}
-                    dataSource={games}
-                    scroll={{ x: "max-content" }}
-                    columns={[
-                      {
-                        title: "",
-                        width: 40,
-                        align: "center",
-                        render: (_v, g) => <StatusIcon status={statusFor(g, existingAppNames)} />,
-                      },
-                      {
-                        title: "Name",
-                        dataIndex: "display_name",
-                        ellipsis: true,
-                      },
-                      {
-                        title: "App ID",
-                        dataIndex: "app_name",
-                        ellipsis: true,
-                        width: 280,
-                        render: (v) => (
-                          <Text type="secondary" code style={{ fontSize: 12 }}>
-                            {v}
-                          </Text>
-                        ),
-                      },
-                      {
-                        title: "Executable",
-                        width: 240,
-                        render: (_v, g) => {
-                          if (g.storetag !== "local" || g.exe_candidates.length <= 1) return null;
-                          const current = props.exeOverrides[g.app_name] ?? g.executable_path;
-                          const isLauncher = (p: string) =>
-                            exeLabel(p).toLowerCase().includes("launcher");
-                          return (
-                            <Tooltip title="Pick which executable to launch. If the game won't open, try switching to the launcher.">
-                              <Select
-                                size="small"
-                                style={{ width: "100%" }}
-                                value={current}
-                                onChange={(v) =>
-                                  props.setExeOverrides({ ...props.exeOverrides, [g.app_name]: v })
-                                }
-                                options={g.exe_candidates.map((p, idx) => ({
-                                  value: p,
-                                  label: (
-                                    <span>
-                                      {exeLabel(p)}
-                                      {isLauncher(p) && (
-                                        <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
-                                          (launcher)
-                                        </Text>
-                                      )}
-                                      {idx === 0 && !isLauncher(p) && (
-                                        <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
-                                          (largest)
-                                        </Text>
-                                      )}
-                                    </span>
-                                  ),
-                                }))}
-                              />
-                            </Tooltip>
-                          );
+                    <Table<Game>
+                      rowKey="app_name"
+                      size="small"
+                      pagination={false}
+                      dataSource={games}
+                      scroll={{ x: "max-content" }}
+                      columns={[
+                        {
+                          title: "",
+                          width: 40,
+                          align: "center",
+                          render: (_v, g) => <StatusIcon status={statusFor(g, existingAppNames)} />,
                         },
-                      },
-                      {
-                        title: "",
-                        width: 90,
-                        align: "right",
-                        render: (_v, g) => {
-                          const synced = existingAppNames.has(g.app_name);
-                          const selected = props.selected.has(g.app_name);
-                          return (
-                            <Tag
-                              color={selected ? (synced ? "orange" : "blue") : "default"}
-                              onClick={() => toggleOne(g.app_name, !selected)}
-                              style={{ cursor: "pointer", margin: 0 }}
-                            >
-                              {selected
-                                ? (synced ? "✓ update" : "✓ selected")
-                                : (synced ? "Update" : "select")}
-                            </Tag>
-                          );
+                        {
+                          title: "Name",
+                          dataIndex: "display_name",
+                          ellipsis: true,
                         },
-                      },
-                    ]}
-                  />
+                        {
+                          title: "App ID",
+                          dataIndex: "app_name",
+                          ellipsis: true,
+                          width: 280,
+                          render: (v) => (
+                            <Text type="secondary" code style={{ fontSize: 12 }}>
+                              {v}
+                            </Text>
+                          ),
+                        },
+                        {
+                          title: "Executable",
+                          width: 240,
+                          render: (_v, g) => {
+                            if (g.storetag !== "local" || g.exe_candidates.length <= 1) return null;
+                            const current = props.exeOverrides[g.app_name] ?? g.executable_path;
+                            const isLauncher = (p: string) =>
+                              exeLabel(p).toLowerCase().includes("launcher");
+                            return (
+                              <Tooltip title="Pick which executable to launch. If the game won't open, try switching to the launcher.">
+                                <Select
+                                  size="small"
+                                  style={{ width: "100%" }}
+                                  value={current}
+                                  onChange={(v) =>
+                                    props.setExeOverrides({ ...props.exeOverrides, [g.app_name]: v })
+                                  }
+                                  options={g.exe_candidates.map((p, idx) => ({
+                                    value: p,
+                                    label: (
+                                      <span>
+                                        {exeLabel(p)}
+                                        {isLauncher(p) && (
+                                          <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+                                            (launcher)
+                                          </Text>
+                                        )}
+                                        {idx === 0 && !isLauncher(p) && (
+                                          <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+                                            (largest)
+                                          </Text>
+                                        )}
+                                      </span>
+                                    ),
+                                  }))}
+                                />
+                              </Tooltip>
+                            );
+                          },
+                        },
+                        {
+                          title: "",
+                          width: 110,
+                          align: "right",
+                          render: (_v, g) => {
+                            const synced = existingAppNames.has(g.app_name);
+                            const selected = props.selected.has(g.app_name);
+                            const color = selected
+                              ? synced
+                                ? "orange"
+                                : "blue"
+                              : "default";
+                            return (
+                              <Tag
+                                className="ss-pick-tag"
+                                color={color}
+                                onClick={() => toggleOne(g.app_name, !selected)}
+                              >
+                                {selected
+                                  ? synced
+                                    ? "✓ update"
+                                    : "✓ queued"
+                                  : synced
+                                  ? "update"
+                                  : "select"}
+                              </Tag>
+                            );
+                          },
+                        },
+                      ]}
+                    />
                   </div>
                 ),
               };
@@ -412,8 +515,10 @@ export default function DetectView(props: Props) {
           <Button
             type="primary"
             size="large"
+            block
             disabled={totalSelected === 0}
             onClick={props.onProceed}
+            style={{ marginTop: 20 }}
           >
             {selectedNew > 0 && selectedUpdates > 0
               ? `Continue — ${selectedNew} new, ${selectedUpdates} update${selectedUpdates !== 1 ? "s" : ""} →`
@@ -421,7 +526,7 @@ export default function DetectView(props: Props) {
               ? `Continue — ${selectedUpdates} update${selectedUpdates !== 1 ? "s" : ""} →`
               : `Continue with ${selectedNew} game${selectedNew !== 1 ? "s" : ""} →`}
           </Button>
-        </>
+        </section>
       )}
     </Space>
   );

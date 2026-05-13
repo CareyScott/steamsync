@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import {
   Alert,
   Button,
-  Card,
   Collapse,
   Form,
   Input,
@@ -28,13 +27,56 @@ interface Props {
   onProceed: () => void;
 }
 
+function ToggleRow({
+  checked,
+  onChange,
+  title,
+  description,
+  badge,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  badge?: React.ReactNode;
+}) {
+  return (
+    <label
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 14,
+        padding: "12px 14px",
+        background: "var(--ss-bg-elevated)",
+        border: `1px solid ${checked ? "var(--ss-action)" : "var(--ss-border)"}`,
+        borderLeftWidth: 3,
+        borderRadius: 4,
+        cursor: "pointer",
+        transition: "all 0.15s ease",
+      }}
+    >
+      <Switch checked={checked} onChange={onChange} style={{ marginTop: 2 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Text strong style={{ fontSize: 13 }}>
+            {title}
+          </Text>
+          {badge}
+        </div>
+        {description && (
+          <div style={{ fontSize: 12, color: "var(--ss-text-muted)", marginTop: 4 }}>
+            {description}
+          </div>
+        )}
+      </div>
+    </label>
+  );
+}
+
 export default function ConfigureView(props: Props) {
   const { options, onOptionsChange, accounts, selectedCount, totalGames, onProceed } = props;
   const set = (patch: Partial<SyncOptions>) => onOptionsChange({ ...options, ...patch });
 
-  // Onboarding modal triggers the first time the user toggles art on
-  // without a key configured. We dismiss as soon as a key is set or the
-  // user opts out, so it doesn't get in the way on subsequent runs.
   const [showSgdbModal, setShowSgdbModal] = useState(false);
   useEffect(() => {
     if (options.download_art && !options.steamgriddb_api_key.trim()) {
@@ -43,82 +85,102 @@ export default function ConfigureView(props: Props) {
   }, [options.download_art, options.steamgriddb_api_key]);
 
   return (
-    <Card>
-      <Form layout="vertical">
-        <Form.Item
-          label="Which Steam account?"
-          help="Where new shortcuts will be added."
-        >
-          {accounts.length > 0 ? (
-            <Select
-              value={options.steamid || undefined}
-              placeholder="Pick an account"
-              onChange={(v) => set({ steamid: v })}
-              options={accounts.map((a) => ({
-                value: a.steamid,
-                label: `${a.username} (${a.steamid})`,
-              }))}
-            />
-          ) : (
-            <Input
-              value={options.steamid}
-              onChange={(e) => set({ steamid: e.target.value })}
-              placeholder="SteamID"
-            />
-          )}
-        </Form.Item>
+    <Space direction="vertical" style={{ width: "100%" }} size="large">
+      <section className="ss-panel">
+        <header className="ss-panel-header">
+          <span className="ss-panel-bar" />
+          <h2 className="ss-panel-title">Account</h2>
+        </header>
+        <Form layout="vertical">
+          <Form.Item
+            label="Target Steam account"
+            help="Where new shortcuts will be added."
+            style={{ marginBottom: 0 }}
+          >
+            {accounts.length > 0 ? (
+              <Select
+                value={options.steamid || undefined}
+                placeholder="Pick an account"
+                onChange={(v) => set({ steamid: v })}
+                options={accounts.map((a) => ({
+                  value: a.steamid,
+                  label: `${a.username} (${a.steamid})`,
+                }))}
+              />
+            ) : (
+              <Input
+                value={options.steamid}
+                onChange={(e) => set({ steamid: e.target.value })}
+                placeholder="SteamID"
+              />
+            )}
+          </Form.Item>
+        </Form>
+      </section>
 
-        <Form.Item>
-          <Space direction="vertical" size="middle">
-            <Space>
-              <Switch
-                checked={options.download_art}
-                onChange={(v) => set({ download_art: v })}
-              />
-              <PictureOutlined />
-              <Text>Download cover art (looks much nicer in Steam)</Text>
-              {options.download_art && options.steamgriddb_api_key.trim() && (
-                <Tag color="green">key set</Tag>
-              )}
-            </Space>
-            <Space>
-              <Switch
-                checked={options.remove_missing}
-                onChange={(v) => set({ remove_missing: v })}
-              />
-              <Text>Remove shortcuts whose games are gone</Text>
-            </Space>
-            <Space>
-              <Switch
-                checked={options.use_uri}
-                onChange={(v) => set({ use_uri: v })}
-              />
-              <Text>
-                Launch via the launcher's URI{" "}
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  (needed for some online games like GTAV)
-                </Text>
-              </Text>
-            </Space>
-          </Space>
-        </Form.Item>
+      <section className="ss-panel">
+        <header className="ss-panel-header">
+          <span className="ss-panel-bar" />
+          <h2 className="ss-panel-title">Options</h2>
+        </header>
 
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          <ToggleRow
+            checked={options.download_art}
+            onChange={(v) => set({ download_art: v })}
+            title={
+              <span>
+                <PictureOutlined style={{ marginRight: 6, color: "var(--ss-accent)" }} />
+                Download cover art
+              </span>
+            }
+            description="Pulls covers, heroes, and logos from SteamGridDB — your library looks 100× better."
+            badge={
+              options.download_art && options.steamgriddb_api_key.trim() ? (
+                <Tag color="green">KEY SET</Tag>
+              ) : null
+            }
+          />
+          <ToggleRow
+            checked={options.remove_missing}
+            onChange={(v) => set({ remove_missing: v })}
+            title="Prune missing shortcuts"
+            description="Remove Steam shortcuts whose source games are gone."
+          />
+          <ToggleRow
+            checked={options.use_uri}
+            onChange={(v) => set({ use_uri: v })}
+            title="Launch via launcher URI"
+            description="Needed for some online games like GTAV that won't run without their launcher."
+          />
+        </Space>
+      </section>
+
+      <section className="ss-panel">
         <Collapse
           ghost
           items={[
             {
               key: "advanced",
               label: (
-                <Text type="secondary">
+                <span
+                  style={{
+                    fontFamily: '"Rajdhani", Inter, sans-serif',
+                    fontWeight: 600,
+                    fontSize: 13,
+                    letterSpacing: "0.16em",
+                    textTransform: "uppercase",
+                    color: "var(--ss-text-muted)",
+                  }}
+                >
                   <InfoCircleOutlined /> Advanced settings
-                </Text>
+                </span>
               ),
               children: (
-                <Space direction="vertical" style={{ width: "100%" }} size="small">
+                <Form layout="vertical" style={{ marginTop: 4 }}>
                   <Form.Item
                     label="Steam install path"
                     help="Auto-detected. Change only if you know what you're doing."
-                    style={{ marginBottom: 12 }}
                   >
                     <Input
                       value={options.steam_path}
@@ -129,7 +191,6 @@ export default function ConfigureView(props: Props) {
                   <Form.Item
                     label="Epic Games Store manifests folder"
                     help="Where Epic stores its .item files."
-                    style={{ marginBottom: 12 }}
                   >
                     <Input
                       value={options.egs_manifests}
@@ -153,30 +214,29 @@ export default function ConfigureView(props: Props) {
                       />
                     </Form.Item>
                   )}
-                </Space>
+                </Form>
               ),
             },
           ]}
         />
+      </section>
 
-        <Button
-          type="primary"
-          size="large"
-          block
-          disabled={!options.steamid || selectedCount === 0}
-          onClick={onProceed}
-          style={{ marginTop: 16 }}
-        >
-          Continue with {selectedCount} of {totalGames} games →
-        </Button>
-      </Form>
+      <Button
+        type="primary"
+        size="large"
+        block
+        disabled={!options.steamid || selectedCount === 0}
+        onClick={onProceed}
+      >
+        Continue with {selectedCount} of {totalGames} games →
+      </Button>
 
       <Modal
         open={showSgdbModal}
         title={
           <Space>
-            <PictureOutlined style={{ color: "#5b6cff" }} />
-            <span>Set up cover art (one-time)</span>
+            <PictureOutlined style={{ color: "var(--ss-accent)" }} />
+            <span>Cover art set-up</span>
           </Space>
         }
         onCancel={() => setShowSgdbModal(false)}
@@ -186,8 +246,8 @@ export default function ConfigureView(props: Props) {
       >
         <Paragraph>
           Cover art comes from <Text strong>SteamGridDB</Text> — a free
-          community-curated database. It takes about a minute to set up and
-          you only have to do it once.
+          community-curated database. Takes about a minute to set up, and you
+          only have to do it once.
         </Paragraph>
 
         <ol style={{ paddingLeft: 20, lineHeight: 1.9 }}>
@@ -213,10 +273,7 @@ export default function ConfigureView(props: Props) {
           <li>Copy the key and paste it below.</li>
         </ol>
 
-        <Form.Item
-          label="API key"
-          style={{ marginTop: 16 }}
-        >
+        <Form.Item label="API key" style={{ marginTop: 16 }}>
           <Input.Password
             value={options.steamgriddb_api_key}
             onChange={(e) => set({ steamgriddb_api_key: e.target.value })}
@@ -251,6 +308,6 @@ export default function ConfigureView(props: Props) {
           </Button>
         </Space>
       </Modal>
-    </Card>
+    </Space>
   );
 }
