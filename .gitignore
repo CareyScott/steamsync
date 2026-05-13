@@ -20,3 +20,6 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Claude Code
+.claude/
